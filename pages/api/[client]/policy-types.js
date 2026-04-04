@@ -1,6 +1,6 @@
 import { getClientConfig } from "../clients";
 
-const API_BASE = "https://api-prod.humand.co/api/v1";
+const API_BASE = "https://api-prod.humand.co/public/api/v1";
 
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
@@ -9,35 +9,53 @@ export default async function handler(req, res) {
   if (!config) return res.status(404).json({ error: "Client not configured" });
 
   try {
-    const resp = await fetch(`${API_BASE}/vacations/policy-types`, {
-      headers: {
-        Authorization: `Bearer ${config.jwtToken}`,
-        "Content-Type": "application/json",
-        Origin: "https://app.humand.co",
-        "x-humand-origin": "web",
-      },
-    });
-    if (!resp.ok) {
-      const err = await resp.text();
-      return res.status(resp.status).json({ error: "Humand API error", details: err });
+    const allItems = [];
+    let page = 1;
+    while (true) {
+      const resp = await fetch(`${API_BASE}/time-off/balances?limit=50&page=${page}`, {
+        headers: {
+          Authorization: `Basic ${config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+      });
+      if (!resp.ok) {
+        const err = await resp.text();
+        return res.status(resp.status).json({ error: "Humand API error", details: err });
+      }
+      const data = await resp.json();
+      allItems.push(...data.items);
+      if (allItems.length >= data.count) break;
+      page++;
     }
-    const data = await resp.json();
-    const types = data.map((pt) => ({
-      id: pt.id,
-      name: pt.name,
-      icon: pt.icon,
-      unit: pt.unit,
-      noRetroactiveRequests: pt.noRetroactiveRequests,
-      minimumAmountPerRequest: pt.minimumAmountPerRequest,
-      maximumAmountPerRequest: pt.maximumAmountPerRequest,
-      minimumAdvanceDays: pt.minimumAdvanceDays,
-      minimumBalance: pt.minimumBalance,
-      allowHalfDayRequests: pt.allowHalfDayRequests,
-      countingMethod: pt.countingMethod,
-      allowanceType: pt.allowanceType,
-    }));
-    res.status(200).json(types);
+
+    const policiesMap = {};
+    for (const item of allItems) {
+      const p = item.policy;
+      const pt = item.policyType;
+      if (!policiesMap[p.id]) {
+        policiesMap[p.id] = {
+          policyId: p.id,
+          policyName: p.name,
+          policyTypeId: pt.id,
+          policyTypeName: pt.name,
+          icon: pt.icon,
+          unit: pt.unit,
+          noRetroactiveRequests: p.noRetroactiveRequests,
+          minimumAmountPerRequest: p.minimumAmountPerRequest,
+          maximumAmountPerRequest: p.maximumAmountPerRequest,
+          minimumAdvanceDays: p.minimumAdvanceDays,
+          minimumBalance: p.minimumBalance,
+          allowHalfDayRequests: p.allowHalfDayRequests,
+          countingMethod: p.countingMethod,
+          allowanceType: p.allowanceType,
+          userCount: 0,
+        };
+      }
+      policiesMap[p.id].userCount++;
+    }
+
+    res.status(200).json(Object.values(policiesMap));
   } catch (err) {
-    res.status(502).json({ error: "Failed to fetch policy types", details: err.message });
+    res.status(502).json({ error: "Failed to fetch policies", details: err.message });
   }
 }

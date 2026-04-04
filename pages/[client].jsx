@@ -132,15 +132,19 @@ export default function ClientPage() {
       const fromDate = parseDate(row[columnMap.fromDate]);
       const toDate = parseDate(row[columnMap.toDate]);
       const user = users.find((u) => normalizeStr(u.email) === email);
-      const pt = policyTypes.find((p) => normalizeStr(p.name) === policyName);
+      const pt = policyTypes.find((p) => normalizeStr(p.policyTypeName) === policyName);
       const errors = [];
       if (!email) errors.push("Email vacio");
       else if (!user) errors.push(`Usuario "${row[columnMap.email]}" no encontrado`);
       if (!policyName) errors.push("Politica vacia");
-      else if (!pt) errors.push(`Politica "${row[columnMap.policy]}" no encontrada`);
+      else if (!pt) errors.push(`Tipo de politica "${row[columnMap.policy]}" no encontrado`);
       if (!fromDate) errors.push("Fecha inicio invalida");
       if (!toDate) errors.push("Fecha fin invalida");
       if (fromDate && toDate && fromDate > toDate) errors.push("Fecha inicio > fecha fin");
+      if (pt) {
+        const { blockers } = getPolicyBlockers(pt);
+        if (blockers.length > 0) errors.push(`Politica bloqueada: ${blockers[0]}`);
+      }
       return {
         raw: row,
         email: row[columnMap.email],
@@ -150,8 +154,9 @@ export default function ClientPage() {
         days: row[columnMap.days],
         userId: user?.id,
         userName: user ? `${user.firstName} ${user.lastName}` : null,
-        policyTypeId: pt?.id,
-        policyTypeName: pt?.name,
+        policyTypeId: pt?.policyTypeId,
+        policyTypeName: pt?.policyTypeName,
+        policyDetail: pt?.policyName,
         errors,
         valid: errors.length === 0,
       };
@@ -238,14 +243,15 @@ export default function ClientPage() {
               <div style={styles.section}>
                 <h2 style={styles.sectionTitle}>Politicas de ausencia ({policyTypes.length})</h2>
                 {policyTypes.length === 0 ? (
-                  <p style={{ color: "#991b1b", fontSize: 14 }}>No se encontraron politicas. Verifica que el JWT token sea valido.</p>
+                  <p style={{ color: "#991b1b", fontSize: 14 }}>No se encontraron politicas. Verifica que la API Key sea valida.</p>
                 ) : (
                   <div style={{ overflowX: "auto" }}>
                     <table style={styles.table}>
                       <thead>
                         <tr>
+                          <th style={styles.th}>Tipo de Politica</th>
                           <th style={styles.th}>Politica</th>
-                          <th style={styles.th}>Tipo</th>
+                          <th style={styles.th}>Usuarios</th>
                           <th style={styles.th}>Conteo</th>
                           <th style={styles.th}>Min dias</th>
                           <th style={styles.th}>Max dias</th>
@@ -259,9 +265,10 @@ export default function ClientPage() {
                           const { blockers, warnings } = getPolicyBlockers(pt);
                           const hasBlocker = blockers.length > 0;
                           return (
-                            <tr key={pt.id} style={{ backgroundColor: hasBlocker ? "#fef2f2" : warnings.length > 0 ? "#fffbeb" : "#f0fdf4" }}>
-                              <td style={styles.td}><strong>{pt.name}</strong></td>
-                              <td style={styles.td}>{pt.allowanceType === "UNLIMITED" ? "Ilimitada" : "Anual"}</td>
+                            <tr key={pt.policyId} style={{ backgroundColor: hasBlocker ? "#fef2f2" : warnings.length > 0 ? "#fffbeb" : "#f0fdf4" }}>
+                              <td style={styles.td}><strong>{pt.policyTypeName}</strong></td>
+                              <td style={styles.td}>{pt.policyName}</td>
+                              <td style={styles.td}>{pt.userCount}</td>
                               <td style={styles.td}>{pt.countingMethod === "CALENDAR_DAYS" ? "Corridos" : "Habiles"}</td>
                               <td style={styles.td}>{pt.minimumAmountPerRequest || "-"}</td>
                               <td style={styles.td}>{pt.maximumAmountPerRequest || "Sin limite"}</td>
@@ -288,7 +295,7 @@ export default function ClientPage() {
                 {policyTypes.some((pt) => getPolicyBlockers(pt).blockers.length > 0) && (
                   <div style={styles.blockerNote}>
                     Las politicas marcadas como BLOQUEADA no permiten crear ausencias en el pasado.
-                    Desactiva "No permitir solicitudes retroactivas" y/o "Dias minimos de anticipacion" desde el panel de Humand antes de continuar.
+                    Desactiva "No permitir solicitudes retroactivas" y/o "Dias minimos de anticipacion" en la configuracion de la politica desde el panel de Humand antes de continuar.
                   </div>
                 )}
               </div>
