@@ -30,8 +30,9 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", apiKey: "", jwtToken: "" });
+  const [form, setForm] = useState({ name: "", apiKey: "", password: "" });
   const [formError, setFormError] = useState("");
+  const [formLoading, setFormLoading] = useState(false);
 
   useEffect(() => {
     fetch("/api/clients")
@@ -51,25 +52,41 @@ export default function Home() {
     c.slug.toLowerCase().includes(search.toLowerCase())
   );
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     setFormError("");
     if (!form.name.trim()) return setFormError("El nombre es obligatorio");
     if (!form.apiKey.trim()) return setFormError("La API Key es obligatoria");
+    if (!form.password.trim()) return setFormError("La contraseña es obligatoria");
     const slug = slugify(form.name);
     if (!slug) return setFormError("Nombre invalido");
     if (allClients.some((c) => c.slug === slug)) return setFormError(`Ya existe un cliente con slug "${slug}"`);
 
-    const newClient = {
-      slug,
-      name: form.name.trim(),
-      apiKey: form.apiKey.trim(),
-      jwtToken: form.jwtToken.trim(),
-    };
-    const updated = [...localClients, newClient];
-    saveLocalClients(updated);
-    setLocalClients(updated);
-    setForm({ name: "", apiKey: "", jwtToken: "" });
-    setShowForm(false);
+    setFormLoading(true);
+    try {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey: form.apiKey.trim(), password: form.password.trim() }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setFormError(data.error); setFormLoading(false); return; }
+
+      const newClient = {
+        slug,
+        name: data.instanceName || form.name.trim(),
+        apiKey: form.apiKey.trim(),
+        jwtToken: data.jwtToken,
+        authUser: data.userName,
+      };
+      const updated = [...localClients, newClient];
+      saveLocalClients(updated);
+      setLocalClients(updated);
+      setForm({ name: "", apiKey: "", password: "" });
+      setShowForm(false);
+    } catch (e) {
+      setFormError("Error de conexion: " + e.message);
+    }
+    setFormLoading(false);
   };
 
   const removeLocal = (slug) => {
@@ -138,21 +155,21 @@ export default function Home() {
                 </a>
               </div>
               <div style={styles.formGroup}>
-                <label style={styles.formLabel}>JWT Token (opcional)</label>
+                <label style={styles.formLabel}>Contraseña de Humand *</label>
                 <input
                   type="password"
-                  value={form.jwtToken}
-                  onChange={(e) => setForm({ ...form, jwtToken: e.target.value })}
-                  placeholder="Bearer token de sesion (para crear solicitudes)"
+                  value={form.password}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                  placeholder="Contraseña del usuario admin en Humand"
                   style={styles.input}
                 />
                 <span style={styles.helpText}>
-                  Necesario para crear ausencias. Se obtiene desde DevTools al loguearse en app.humand.co
+                  La contraseña del usuario que creo la API Key. Se usa para autenticarse y no se almacena.
                 </span>
               </div>
               {formError && <p style={styles.formError}>{formError}</p>}
-              <button style={styles.btnPrimary} onClick={handleCreate}>
-                Crear comunidad
+              <button style={{ ...styles.btnPrimary, opacity: formLoading ? 0.6 : 1 }} onClick={handleCreate} disabled={formLoading}>
+                {formLoading ? "Conectando..." : "Crear comunidad"}
               </button>
             </div>
           )}
