@@ -273,6 +273,25 @@ export default function ClientPage() {
   const skippedCount = Object.values(results).filter((r) => r.skipped).length;
   const validCount = validatedRows.filter((r) => r.valid).length;
 
+  const downloadResults = () => {
+    const exportRows = validatedRows.map((row, i) => {
+      const r = results[i];
+      const resultado = r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar";
+      return {
+        ...row.raw,
+        "Usuario Resuelto": row.userName || "",
+        "Email Resuelto": row.userEmail || "",
+        "Match": row.matchMethod || "",
+        "Politica Resuelta": row.policyTypeName || "",
+        Resultado: resultado,
+      };
+    });
+    const ws = XLSX.utils.json_to_sheet(exportRows);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Resultados");
+    XLSX.writeFile(wb, `resultados-${clientSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   return (
     <>
       <Head>
@@ -535,6 +554,9 @@ export default function ClientPage() {
                 <div style={{ ...styles.actions, marginTop: 16 }}>
                   <button style={styles.btnSecondary} onClick={() => { setStep("upload"); setRows([]); setValidatedRows([]); setResults({}); }}>
                     Cargar otro archivo
+                  </button>
+                  <button style={styles.btnPrimary} onClick={downloadResults}>
+                    Descargar resultados (.xlsx)
                   </button>
                 </div>
               )}
