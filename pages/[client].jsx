@@ -103,9 +103,20 @@ function getPolicyBlockers(pt) {
   return { blockers, warnings };
 }
 
+function getLocalClient(slug) {
+  if (typeof window === "undefined") return null;
+  try {
+    const clients = JSON.parse(localStorage.getItem("humand_clients") || "[]");
+    return clients.find((c) => c.slug === slug) || null;
+  } catch {
+    return null;
+  }
+}
+
 export default function ClientPage() {
   const [clientSlug, setClientSlug] = useState(null);
   const [clientName, setClientName] = useState("");
+  const [credHeaders, setCredHeaders] = useState({});
   const [step, setStep] = useState("loading"); // loading | policies | upload | mapping | executing | done
   const [rows, setRows] = useState([]);
   const [headers, setHeaders] = useState([]);
@@ -118,25 +129,39 @@ export default function ClientPage() {
   const [processing, setProcessing] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [dragOver, setDragOver] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const fileRef = useRef(null);
 
   useEffect(() => {
     const slug = window.location.pathname.replace("/", "");
     setClientSlug(slug);
-    fetch("/api/clients")
-      .then((r) => r.json())
-      .then((clients) => {
-        const c = clients.find((x) => x.slug === slug);
-        if (c) setClientName(c.name);
-      });
+
+    // Build auth headers: env client needs none, local client passes creds
+    let authHeaders = {};
+    const local = getLocalClient(slug);
+    if (local) {
+      setClientName(local.name);
+      authHeaders = { "x-humand-api-key": local.apiKey };
+      if (local.jwtToken) authHeaders["x-humand-jwt-token"] = local.jwtToken;
+    } else {
+      fetch("/api/clients")
+        .then((r) => r.json())
+        .then((clients) => {
+          const c = clients.find((x) => x.slug === slug);
+          if (c) setClientName(c.name);
+        });
+    }
+    setCredHeaders(authHeaders);
+
     Promise.all([
-      fetch(`/api/${slug}/users`).then((r) => r.json()),
-      fetch(`/api/${slug}/policy-types`).then((r) => r.json()),
+      fetch(`/api/${slug}/users`, { headers: authHeaders }).then((r) => r.json()),
+      fetch(`/api/${slug}/policy-types`, { headers: authHeaders }).then((r) => r.json()),
     ]).then(([usersRes, ptRes]) => {
+      if (usersRes.error) { setLoadError(usersRes.details || usersRes.error); setStep("policies"); return; }
       setUsers(Array.isArray(usersRes) ? usersRes : []);
       setPolicyTypes(Array.isArray(ptRes) ? ptRes : []);
       setStep("policies");
-    }).catch(() => setStep("policies"));
+    }).catch((e) => { setLoadError(e.message); setStep("policies"); });
   }, []);
 
   const handleFile = useCallback(
@@ -235,7 +260,7 @@ export default function ClientPage() {
       try {
         const createRes = await fetch(`/api/${clientSlug}/create`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...credHeaders },
           body: JSON.stringify({
             issuerId: row.userId,
             policyTypeId: row.policyTypeId,
@@ -251,7 +276,7 @@ export default function ClientPage() {
         }
         const approveRes = await fetch(`/api/${clientSlug}/approve`, {
           method: "PUT",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...credHeaders },
           body: JSON.stringify({ requestId: createData.id }),
         });
         if (approveRes.ok) {
@@ -317,7 +342,10 @@ export default function ClientPage() {
             <>
               <div style={styles.section}>
                 <h2 style={styles.sectionTitle}>Politicas de ausencia ({policyTypes.length})</h2>
-                {policyTypes.length === 0 ? (
+                {loadError && (
+                  <div style={styles.blockerNote}>Error al cargar datos: {loadError}</div>
+                )}
+                {!loadError && policyTypes.length === 0 ? (
                   <p style={{ color: "#991b1b", fontSize: 14 }}>No se encontraron politicas. Verifica que la API Key sea valida.</p>
                 ) : (
                   <div style={{ overflowX: "auto" }}>

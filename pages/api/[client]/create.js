@@ -19,7 +19,7 @@ function translateError(msg, policyTypeId, userId) {
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const config = getClientConfig(req.query.client);
+  const config = getClientConfig(req.query.client, req);
   if (!config) return res.status(404).json({ error: "Client not configured" });
 
   const { issuerId, policyTypeId, fromDate, toDate, description } = req.body;
