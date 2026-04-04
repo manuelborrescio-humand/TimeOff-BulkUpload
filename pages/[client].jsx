@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import * as XLSX from "xlsx";
-import { getHistory, addHistoryEntry, deleteHistoryEntry, saveSessionData, getSessionData, generateEntryId } from "../lib/history";
+import { getHistory, addHistoryEntry, deleteHistoryEntry, updateHistoryEntry, generateEntryId } from "../lib/history";
 
 const COLUMN_PATTERNS = {
   email: [/usuario/i, /email/i, /correo/i, /mail/i, /empleado/i],
@@ -309,9 +309,31 @@ export default function ClientPage() {
       successCount: successN,
       errorCount: errorN,
       skippedCount: skippedN,
+      blobUrl: null,
     });
-    saveSessionData(entryId, { validatedRows, results: newResults });
     setHistory(getHistory(clientSlug));
+
+    // Upload results Excel to Vercel Blob in background
+    try {
+      const exportRows = validatedRows.map((row, i) => {
+        const r = newResults[i];
+        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Politica Resuelta": row.policyTypeName || "", Resultado: r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
+      });
+      const ws = XLSX.utils.json_to_sheet(exportRows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Resultados");
+      const wbOut = XLSX.write(wb, { type: "base64", bookType: "xlsx" });
+      const blobRes = await fetch("/api/blob", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ fileName: `resultados-${clientSlug}-${entryId}.xlsx`, base64: wbOut }),
+      });
+      if (blobRes.ok) {
+        const { url } = await blobRes.json();
+        updateHistoryEntry(clientSlug, entryId, { blobUrl: url });
+        setHistory(getHistory(clientSlug));
+      }
+    } catch {}
   };
 
   const successCount = Object.values(results).filter((r) => r.ok).length;
@@ -446,9 +468,7 @@ export default function ClientPage() {
                         </tr>
                       </thead>
                       <tbody>
-                        {history.map((entry) => {
-                          const hasSession = !!getSessionData(entry.id);
-                          return (
+                        {history.map((entry) => (
                             <tr key={entry.id}>
                               <td style={styles.td}>{new Date(entry.timestamp).toLocaleString("es-AR", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</td>
                               <td style={styles.td}>{entry.fileName}</td>
@@ -458,29 +478,20 @@ export default function ClientPage() {
                               <td style={styles.td}>{entry.skippedCount}</td>
                               <td style={styles.td}>
                                 <div style={{ display: "flex", gap: 6 }}>
-                                  {hasSession && (
-                                    <button style={styles.btnSmall} onClick={() => {
-                                      const data = getSessionData(entry.id);
-                                      if (!data) return;
-                                      const exportRows = data.validatedRows.map((row, i) => {
-                                        const r = data.results[i];
-                                        return { ...row.raw, "Resultado": r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
-                                      });
-                                      const ws = XLSX.utils.json_to_sheet(exportRows);
-                                      const wb = XLSX.utils.book_new();
-                                      XLSX.utils.book_append_sheet(wb, ws, "Resultados");
-                                      XLSX.writeFile(wb, `resultados-${clientSlug}-${entry.id}.xlsx`);
-                                    }}>Descargar</button>
+                                  {entry.blobUrl && (
+                                    <a href={entry.blobUrl} download style={{ ...styles.btnSmall, textDecoration: "none", display: "inline-block" }}>Descargar</a>
                                   )}
-                                  <button style={{ ...styles.btnSmall, color: "#991b1b", backgroundColor: "#fef2f2" }} onClick={() => {
+                                  <button style={{ ...styles.btnSmall, color: "#991b1b", backgroundColor: "#fef2f2" }} onClick={async () => {
+                                    if (entry.blobUrl) {
+                                      try { await fetch("/api/blob", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: entry.blobUrl }) }); } catch {}
+                                    }
                                     deleteHistoryEntry(clientSlug, entry.id);
                                     setHistory(getHistory(clientSlug));
                                   }}>Eliminar</button>
                                 </div>
                               </td>
                             </tr>
-                          );
-                        })}
+                          ))}
                       </tbody>
                     </table>
                   </div>
