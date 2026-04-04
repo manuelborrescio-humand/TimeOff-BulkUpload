@@ -14,7 +14,7 @@ const COLUMN_PATTERNS = {
 
 function detectColumn(headers, patterns) {
   for (const p of patterns) {
-    const found = headers.find((h) => p.test(h));
+    const found = headers.find((h) => p.test(normalizeStr(h)));
     if (found) return found;
   }
   return null;
