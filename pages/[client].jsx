@@ -245,7 +245,7 @@ export default function ClientPage() {
         });
         const createData = await createRes.json();
         if (!createRes.ok) {
-          newResults[i] = { ok: false, error: createData.details?.message || createData.error || "Error al crear" };
+          newResults[i] = { ok: false, error: createData.error || "Error al crear" };
           setResults({ ...newResults });
           continue;
         }
