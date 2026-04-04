@@ -212,7 +212,7 @@ export default function ClientPage() {
       const fromDate = parseDate(row[columnMap.fromDate]);
       const toDate = parseDate(row[columnMap.toDate]);
       const { user, method: matchMethod, ambiguous } = findUser(userInput, users);
-      const pt = policyTypes.find((p) => normalizeStr(p.policyTypeName) === policyName);
+      const pt = policyTypes.find((p) => normalizeStr(p.policyTypeName) === policyName || normalizeStr(p.policyName) === policyName);
       const errors = [];
       const warnings = [];
       if (!userInput) errors.push("Usuario vacio");
