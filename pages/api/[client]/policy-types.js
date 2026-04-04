@@ -22,7 +22,20 @@ export default async function handler(req, res) {
       return res.status(resp.status).json({ error: "Humand API error", details: err });
     }
     const data = await resp.json();
-    const types = data.map((pt) => ({ id: pt.id, name: pt.name, icon: pt.icon, unit: pt.unit }));
+    const types = data.map((pt) => ({
+      id: pt.id,
+      name: pt.name,
+      icon: pt.icon,
+      unit: pt.unit,
+      noRetroactiveRequests: pt.noRetroactiveRequests,
+      minimumAmountPerRequest: pt.minimumAmountPerRequest,
+      maximumAmountPerRequest: pt.maximumAmountPerRequest,
+      minimumAdvanceDays: pt.minimumAdvanceDays,
+      minimumBalance: pt.minimumBalance,
+      allowHalfDayRequests: pt.allowHalfDayRequests,
+      countingMethod: pt.countingMethod,
+      allowanceType: pt.allowanceType,
+    }));
     res.status(200).json(types);
   } catch (err) {
     res.status(502).json({ error: "Failed to fetch policy types", details: err.message });

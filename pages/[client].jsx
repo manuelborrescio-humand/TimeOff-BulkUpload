@@ -43,10 +43,20 @@ function normalizeStr(s) {
     .trim();
 }
 
+function getPolicyBlockers(pt) {
+  const blockers = [];
+  const warnings = [];
+  if (pt.noRetroactiveRequests) blockers.push("No permite solicitudes retroactivas");
+  if (pt.minimumAdvanceDays && pt.minimumAdvanceDays > 0) blockers.push(`Requiere ${pt.minimumAdvanceDays} dias de anticipacion`);
+  if (pt.minimumAmountPerRequest && pt.minimumAmountPerRequest > 1) warnings.push(`Minimo ${pt.minimumAmountPerRequest} dias por solicitud`);
+  if (pt.maximumAmountPerRequest) warnings.push(`Maximo ${pt.maximumAmountPerRequest} dias por solicitud`);
+  return { blockers, warnings };
+}
+
 export default function ClientPage() {
   const [clientSlug, setClientSlug] = useState(null);
   const [clientName, setClientName] = useState("");
-  const [step, setStep] = useState("upload"); // upload | mapping | executing | done
+  const [step, setStep] = useState("loading"); // loading | policies | upload | mapping | executing | done
   const [rows, setRows] = useState([]);
   const [headers, setHeaders] = useState([]);
   const [columnMap, setColumnMap] = useState({});
@@ -69,25 +79,15 @@ export default function ClientPage() {
         const c = clients.find((x) => x.slug === slug);
         if (c) setClientName(c.name);
       });
+    Promise.all([
+      fetch(`/api/${slug}/users`).then((r) => r.json()),
+      fetch(`/api/${slug}/policy-types`).then((r) => r.json()),
+    ]).then(([usersRes, ptRes]) => {
+      setUsers(Array.isArray(usersRes) ? usersRes : []);
+      setPolicyTypes(Array.isArray(ptRes) ? ptRes : []);
+      setStep("policies");
+    }).catch(() => setStep("policies"));
   }, []);
-
-  const loadMeta = useCallback(
-    async (slug) => {
-      setLoadingMeta(true);
-      try {
-        const [usersRes, ptRes] = await Promise.all([
-          fetch(`/api/${slug}/users`).then((r) => r.json()),
-          fetch(`/api/${slug}/policy-types`).then((r) => r.json()),
-        ]);
-        setUsers(Array.isArray(usersRes) ? usersRes : []);
-        setPolicyTypes(Array.isArray(ptRes) ? ptRes : []);
-      } catch (e) {
-        console.error("Failed to load metadata", e);
-      }
-      setLoadingMeta(false);
-    },
-    []
-  );
 
   const handleFile = useCallback(
     (file) => {
@@ -111,11 +111,10 @@ export default function ClientPage() {
         };
         setColumnMap(map);
         setStep("mapping");
-        if (clientSlug) loadMeta(clientSlug);
       };
       reader.readAsArrayBuffer(file);
     },
-    [clientSlug, loadMeta]
+    []
   );
 
   const onDrop = (e) => {
@@ -227,6 +226,84 @@ export default function ClientPage() {
             <h1 style={styles.title}>{clientName || clientSlug}</h1>
             <p style={styles.subtitle}>Carga masiva de ausencias/vacaciones</p>
           </div>
+
+          {step === "loading" && (
+            <div style={styles.section}>
+              <p style={styles.loading}>Cargando informacion de la comunidad...</p>
+            </div>
+          )}
+
+          {step === "policies" && (
+            <>
+              <div style={styles.section}>
+                <h2 style={styles.sectionTitle}>Politicas de ausencia ({policyTypes.length})</h2>
+                {policyTypes.length === 0 ? (
+                  <p style={{ color: "#991b1b", fontSize: 14 }}>No se encontraron politicas. Verifica que el JWT token sea valido.</p>
+                ) : (
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={styles.table}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>Politica</th>
+                          <th style={styles.th}>Tipo</th>
+                          <th style={styles.th}>Conteo</th>
+                          <th style={styles.th}>Min dias</th>
+                          <th style={styles.th}>Max dias</th>
+                          <th style={styles.th}>Retroactivo</th>
+                          <th style={styles.th}>Anticipacion</th>
+                          <th style={styles.th}>Estado</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {policyTypes.map((pt) => {
+                          const { blockers, warnings } = getPolicyBlockers(pt);
+                          const hasBlocker = blockers.length > 0;
+                          return (
+                            <tr key={pt.id} style={{ backgroundColor: hasBlocker ? "#fef2f2" : warnings.length > 0 ? "#fffbeb" : "#f0fdf4" }}>
+                              <td style={styles.td}><strong>{pt.name}</strong></td>
+                              <td style={styles.td}>{pt.allowanceType === "UNLIMITED" ? "Ilimitada" : "Anual"}</td>
+                              <td style={styles.td}>{pt.countingMethod === "CALENDAR_DAYS" ? "Corridos" : "Habiles"}</td>
+                              <td style={styles.td}>{pt.minimumAmountPerRequest || "-"}</td>
+                              <td style={styles.td}>{pt.maximumAmountPerRequest || "Sin limite"}</td>
+                              <td style={{ ...styles.td, color: pt.noRetroactiveRequests ? "#991b1b" : "#166534", fontWeight: 600 }}>
+                                {pt.noRetroactiveRequests ? "NO" : "SI"}
+                              </td>
+                              <td style={styles.td}>{pt.minimumAdvanceDays ? `${pt.minimumAdvanceDays} dias` : "Ninguna"}</td>
+                              <td style={styles.td}>
+                                {hasBlocker ? (
+                                  <span style={styles.badge.error} title={blockers.join("\n")}>BLOQUEADA</span>
+                                ) : warnings.length > 0 ? (
+                                  <span style={styles.badge.warning} title={warnings.join("\n")}>ADVERTENCIA</span>
+                                ) : (
+                                  <span style={styles.badge.ok}>OK</span>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {policyTypes.some((pt) => getPolicyBlockers(pt).blockers.length > 0) && (
+                  <div style={styles.blockerNote}>
+                    Las politicas marcadas como BLOQUEADA no permiten crear ausencias en el pasado.
+                    Desactiva "No permitir solicitudes retroactivas" y/o "Dias minimos de anticipacion" desde el panel de Humand antes de continuar.
+                  </div>
+                )}
+              </div>
+              <div style={styles.section}>
+                <p style={{ margin: 0, fontSize: 13, color: "#64748b" }}>
+                  {users.length} usuarios cargados en esta comunidad
+                </p>
+              </div>
+              <div style={styles.actions}>
+                <button style={styles.btnPrimary} onClick={() => setStep("upload")}>
+                  Continuar a carga de archivo
+                </button>
+              </div>
+            </>
+          )}
 
           {step === "upload" && (
             <div
@@ -471,6 +548,24 @@ const styles = {
       textOverflow: "ellipsis",
       whiteSpace: "nowrap",
     },
+    warning: {
+      backgroundColor: "#fffbeb",
+      color: "#92400e",
+      padding: "2px 8px",
+      borderRadius: 4,
+      fontSize: 12,
+      fontWeight: 500,
+    },
+  },
+  blockerNote: {
+    marginTop: 16,
+    padding: 12,
+    backgroundColor: "#fef2f2",
+    border: "1px solid #fecaca",
+    borderRadius: 6,
+    fontSize: 13,
+    color: "#991b1b",
+    lineHeight: 1.5,
   },
   actions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 8 },
   btnPrimary: {
