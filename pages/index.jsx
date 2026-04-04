@@ -146,7 +146,7 @@ export default function Home() {
                   style={styles.input}
                 />
                 <a
-                  href="https://humand-api-docs.vercel.app/"
+                  href="https://ops.humand.co/api-keys"
                   target="_blank"
                   rel="noopener noreferrer"
                   style={styles.helpLink}
