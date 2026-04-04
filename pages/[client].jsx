@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import * as XLSX from "xlsx";
+import { getHistory, addHistoryEntry, deleteHistoryEntry, saveSessionData, getSessionData, generateEntryId } from "../lib/history";
 
 const COLUMN_PATTERNS = {
   email: [/usuario/i, /email/i, /correo/i, /mail/i, /empleado/i],
@@ -130,6 +131,8 @@ export default function ClientPage() {
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [dragOver, setDragOver] = useState(false);
   const [loadError, setLoadError] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [history, setHistory] = useState([]);
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -161,12 +164,14 @@ export default function ClientPage() {
       setUsers(Array.isArray(usersRes) ? usersRes : []);
       setPolicyTypes(Array.isArray(ptRes) ? ptRes : []);
       setStep("policies");
-    }).catch((e) => { setLoadError(e.message); setStep("policies"); });
+      setHistory(getHistory(slug));
+    }).catch((e) => { setLoadError(e.message); setStep("policies"); setHistory(getHistory(slug)); });
   }, []);
 
   const handleFile = useCallback(
     (file) => {
       if (!file) return;
+      setFileName(file.name);
       const reader = new FileReader();
       reader.onload = (e) => {
         const data = new Uint8Array(e.target.result);
@@ -291,6 +296,22 @@ export default function ClientPage() {
     }
     setProcessing(false);
     setStep("done");
+
+    const entryId = generateEntryId();
+    const successN = Object.values(newResults).filter((r) => r.ok).length;
+    const errorN = Object.values(newResults).filter((r) => !r.ok && !r.skipped).length;
+    const skippedN = Object.values(newResults).filter((r) => r.skipped).length;
+    addHistoryEntry(clientSlug, {
+      id: entryId,
+      timestamp: new Date().toISOString(),
+      fileName: fileName || "archivo",
+      totalRows: validatedRows.length,
+      successCount: successN,
+      errorCount: errorN,
+      skippedCount: skippedN,
+    });
+    saveSessionData(entryId, { validatedRows, results: newResults });
+    setHistory(getHistory(clientSlug));
   };
 
   const successCount = Object.values(results).filter((r) => r.ok).length;
@@ -407,6 +428,65 @@ export default function ClientPage() {
                   {users.length} usuarios cargados en esta comunidad
                 </p>
               </div>
+
+              {history.length > 0 && (
+                <div style={styles.section}>
+                  <h2 style={styles.sectionTitle}>Historial de cargas ({history.length})</h2>
+                  <div style={{ overflowX: "auto" }}>
+                    <table style={styles.table}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>Fecha</th>
+                          <th style={styles.th}>Archivo</th>
+                          <th style={styles.th}>Total</th>
+                          <th style={styles.th}>OK</th>
+                          <th style={styles.th}>Errores</th>
+                          <th style={styles.th}>Omitidas</th>
+                          <th style={styles.th}>Acciones</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {history.map((entry) => {
+                          const hasSession = !!getSessionData(entry.id);
+                          return (
+                            <tr key={entry.id}>
+                              <td style={styles.td}>{new Date(entry.timestamp).toLocaleString("es-AR", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}</td>
+                              <td style={styles.td}>{entry.fileName}</td>
+                              <td style={styles.td}>{entry.totalRows}</td>
+                              <td style={{ ...styles.td, color: "#166534" }}>{entry.successCount}</td>
+                              <td style={{ ...styles.td, color: entry.errorCount > 0 ? "#991b1b" : "#334155" }}>{entry.errorCount}</td>
+                              <td style={styles.td}>{entry.skippedCount}</td>
+                              <td style={styles.td}>
+                                <div style={{ display: "flex", gap: 6 }}>
+                                  {hasSession && (
+                                    <button style={styles.btnSmall} onClick={() => {
+                                      const data = getSessionData(entry.id);
+                                      if (!data) return;
+                                      const exportRows = data.validatedRows.map((row, i) => {
+                                        const r = data.results[i];
+                                        return { ...row.raw, "Resultado": r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
+                                      });
+                                      const ws = XLSX.utils.json_to_sheet(exportRows);
+                                      const wb = XLSX.utils.book_new();
+                                      XLSX.utils.book_append_sheet(wb, ws, "Resultados");
+                                      XLSX.writeFile(wb, `resultados-${clientSlug}-${entry.id}.xlsx`);
+                                    }}>Descargar</button>
+                                  )}
+                                  <button style={{ ...styles.btnSmall, color: "#991b1b", backgroundColor: "#fef2f2" }} onClick={() => {
+                                    deleteHistoryEntry(clientSlug, entry.id);
+                                    setHistory(getHistory(clientSlug));
+                                  }}>Eliminar</button>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               <div style={styles.actions}>
                 <button style={styles.btnPrimary} onClick={() => setStep("upload")}>
                   Continuar a carga de archivo
@@ -698,6 +778,15 @@ const styles = {
     fontSize: 14,
     fontWeight: 500,
     cursor: "pointer",
+  },
+  btnSmall: {
+    background: "#f8fafc",
+    border: "1px solid #e2e8f0",
+    borderRadius: 4,
+    padding: "3px 10px",
+    fontSize: 12,
+    cursor: "pointer",
+    color: "#334155",
   },
   summary: { display: "flex", gap: 12, marginBottom: 16 },
   summaryOk: { color: "#166534", fontWeight: 600, fontSize: 14 },

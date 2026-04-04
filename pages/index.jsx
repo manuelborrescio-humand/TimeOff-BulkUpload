@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import Head from "next/head";
 import Link from "next/link";
+import { getHistory } from "../lib/history";
 
 function slugify(name) {
   return name
@@ -185,7 +186,16 @@ export default function Home() {
               {filtered.map((c) => (
                 <div key={`${c.source}-${c.slug}`} style={styles.cardRow}>
                   <Link href={`/${c.slug}`} style={styles.card}>
-                    <div style={styles.cardName}>{c.name}</div>
+                    <div>
+                      <div style={styles.cardName}>{c.name}</div>
+                      {(() => {
+                        const h = getHistory(c.slug);
+                        if (h.length === 0) return null;
+                        const last = h[0];
+                        const d = new Date(last.timestamp).toLocaleDateString("es-AR", { day: "2-digit", month: "short", year: "numeric" });
+                        return <div style={styles.cardHistory}>{d} — {last.successCount} OK{last.errorCount > 0 ? `, ${last.errorCount} errores` : ""}</div>;
+                      })()}
+                    </div>
                     <div style={styles.cardMeta}>
                       <span style={styles.cardSlug}>/{c.slug}</span>
                       {c.source === "local" && <span style={styles.localBadge}>local</span>}
@@ -282,6 +292,7 @@ const styles = {
     cursor: "pointer",
   },
   cardName: { fontSize: 14, fontWeight: 600, color: "#0f172a" },
+  cardHistory: { fontSize: 11, color: "#64748b", marginTop: 2 },
   cardMeta: { display: "flex", alignItems: "center", gap: 8 },
   cardSlug: { fontSize: 12, color: "#94a3b8" },
   localBadge: {
