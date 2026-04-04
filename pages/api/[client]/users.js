@@ -31,6 +31,7 @@ export default async function handler(req, res) {
           employeeInternalId: u.employeeInternalId,
           firstName: u.firstName,
           lastName: u.lastName,
+          nickname: u.nickname,
         });
       }
       if (allUsers.length >= data.count) break;

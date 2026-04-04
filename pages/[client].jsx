@@ -43,6 +43,56 @@ function normalizeStr(s) {
     .trim();
 }
 
+function findUser(input, users) {
+  const val = normalizeStr(input);
+  if (!val) return { user: null, method: null };
+
+  // 1. Exact email match
+  const byEmail = users.find((u) => normalizeStr(u.email) === val);
+  if (byEmail) return { user: byEmail, method: "email" };
+
+  // 2. Exact employeeInternalId match
+  const byIntId = users.find((u) => normalizeStr(u.employeeInternalId) === val);
+  if (byIntId) return { user: byIntId, method: "internalId" };
+
+  // 3. Exact nickname match
+  const byNick = users.find((u) => u.nickname && normalizeStr(u.nickname) === val);
+  if (byNick) return { user: byNick, method: "nickname" };
+
+  // 4. Exact full name match: "firstName lastName" or "lastName firstName"
+  const byFullName = users.find((u) => {
+    const fn = normalizeStr(u.firstName);
+    const ln = normalizeStr(u.lastName);
+    return val === `${fn} ${ln}` || val === `${ln} ${fn}` || val === `${ln}, ${fn}`;
+  });
+  if (byFullName) return { user: byFullName, method: "nombre completo" };
+
+  // 5. Partial: input contains both firstName and lastName (any order)
+  const byParts = users.filter((u) => {
+    const fn = normalizeStr(u.firstName);
+    const ln = normalizeStr(u.lastName);
+    if (!fn || !ln) return false;
+    const fnParts = fn.split(/\s+/);
+    const lnParts = ln.split(/\s+/);
+    const allParts = [...fnParts, ...lnParts];
+    return allParts.every((part) => part.length > 1 && val.includes(part));
+  });
+  if (byParts.length === 1) return { user: byParts[0], method: "nombre parcial" };
+  if (byParts.length > 1) return { user: null, method: null, ambiguous: byParts.map((u) => `${u.firstName} ${u.lastName} (${u.email})`) };
+
+  // 6. Email prefix match (before @)
+  const valPrefix = val.split("@")[0];
+  if (valPrefix && valPrefix.length > 2) {
+    const byPrefix = users.find((u) => {
+      const uPrefix = normalizeStr(u.email).split("@")[0];
+      return uPrefix === valPrefix;
+    });
+    if (byPrefix) return { user: byPrefix, method: "email prefix" };
+  }
+
+  return { user: null, method: null };
+}
+
 function getPolicyBlockers(pt) {
   const blockers = [];
   const warnings = [];
@@ -127,15 +177,18 @@ export default function ClientPage() {
   useEffect(() => {
     if (step !== "mapping" || users.length === 0 || policyTypes.length === 0) return;
     const validated = rows.map((row) => {
-      const email = normalizeStr(row[columnMap.email]);
+      const userInput = (row[columnMap.email] || "").toString().trim();
       const policyName = normalizeStr(row[columnMap.policy]);
       const fromDate = parseDate(row[columnMap.fromDate]);
       const toDate = parseDate(row[columnMap.toDate]);
-      const user = users.find((u) => normalizeStr(u.email) === email);
+      const { user, method: matchMethod, ambiguous } = findUser(userInput, users);
       const pt = policyTypes.find((p) => normalizeStr(p.policyTypeName) === policyName);
       const errors = [];
-      if (!email) errors.push("Email vacio");
-      else if (!user) errors.push(`Usuario "${row[columnMap.email]}" no encontrado`);
+      const warnings = [];
+      if (!userInput) errors.push("Usuario vacio");
+      else if (ambiguous) errors.push(`Ambiguo: ${ambiguous.join(", ")}`);
+      else if (!user) errors.push(`Usuario "${userInput}" no encontrado`);
+      else if (matchMethod && matchMethod !== "email") warnings.push(`Match por ${matchMethod}`);
       if (!policyName) errors.push("Politica vacia");
       else if (!pt) errors.push(`Tipo de politica "${row[columnMap.policy]}" no encontrado`);
       if (!fromDate) errors.push("Fecha inicio invalida");
@@ -154,10 +207,13 @@ export default function ClientPage() {
         days: row[columnMap.days],
         userId: user?.id,
         userName: user ? `${user.firstName} ${user.lastName}` : null,
+        userEmail: user?.email,
+        matchMethod,
         policyTypeId: pt?.policyTypeId,
         policyTypeName: pt?.policyTypeName,
         policyDetail: pt?.policyName,
         errors,
+        warnings,
         valid: errors.length === 0,
       };
     });
@@ -342,7 +398,7 @@ export default function ClientPage() {
               <div style={styles.section}>
                 <h2 style={styles.sectionTitle}>Mapeo de columnas</h2>
                 <div style={styles.mappingGrid}>
-                  {Object.entries({ email: "Email/Usuario", policy: "Politica", fromDate: "Fecha inicio", toDate: "Fecha fin", days: "Dias (info)" }).map(
+                  {Object.entries({ email: "Usuario (email/nombre)", policy: "Politica", fromDate: "Fecha inicio", toDate: "Fecha fin", days: "Dias (info)" }).map(
                     ([key, label]) => (
                       <div key={key} style={styles.mappingRow}>
                         <label style={styles.mappingLabel}>{label}</label>
@@ -391,7 +447,10 @@ export default function ClientPage() {
                               <td style={styles.td}>{i + 1}</td>
                               <td style={styles.td}>
                                 <div>{row.email}</div>
-                                {row.userName && <div style={{ fontSize: 12, color: "#64748b" }}>{row.userName}</div>}
+                                {row.userName && <div style={{ fontSize: 12, color: "#64748b" }}>{row.userName}{row.matchMethod !== "email" ? ` (${row.userEmail})` : ""}</div>}
+                                {row.matchMethod && row.matchMethod !== "email" && (
+                                  <div style={{ fontSize: 11, color: "#d97706" }}>Match: {row.matchMethod}</div>
+                                )}
                               </td>
                               <td style={styles.td}>{row.policyTypeName || row.policyName}</td>
                               <td style={styles.td}>{row.fromDate || "?"}</td>
