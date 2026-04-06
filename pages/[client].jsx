@@ -44,6 +44,25 @@ function normalizeStr(s) {
     .trim();
 }
 
+function countDays(fromDate, toDate, countingMethod) {
+  if (!fromDate || !toDate) return null;
+  const from = new Date(fromDate + "T00:00:00");
+  const to = new Date(toDate + "T00:00:00");
+  if (isNaN(from) || isNaN(to) || from > to) return null;
+  let count = 0;
+  const d = new Date(from);
+  while (d <= to) {
+    if (countingMethod === "BUSINESS_DAYS") {
+      const dow = d.getDay();
+      if (dow !== 0 && dow !== 6) count++;
+    } else {
+      count++;
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return count;
+}
+
 function findUser(input, users) {
   const val = normalizeStr(input);
   if (!val) return { user: null, method: null };
@@ -214,6 +233,12 @@ export default function ClientPage() {
         const { blockers } = getPolicyBlockers(pt);
         if (blockers.length > 0) errors.push(`Politica bloqueada: ${blockers[0]}`);
       }
+      const cm = pt?.countingMethod || "CALENDAR_DAYS";
+      const expectedDays = countDays(fromDate, toDate, cm);
+      const excelDays = row[columnMap.days] ? Number(row[columnMap.days]) : null;
+      if (expectedDays && excelDays && excelDays !== expectedDays) {
+        warnings.push(`Excel dice ${excelDays} dias, calculados: ${expectedDays} ${cm === "BUSINESS_DAYS" ? "habiles" : "corridos"}`);
+      }
       return {
         raw: row,
         email: row[columnMap.email],
@@ -221,6 +246,8 @@ export default function ClientPage() {
         fromDate,
         toDate,
         days: row[columnMap.days],
+        expectedDays,
+        countingMethod: cm,
         userId: user?.id,
         userName: user ? `${user.firstName} ${user.lastName}` : null,
         userEmail: user?.email,
@@ -271,7 +298,10 @@ export default function ClientPage() {
           body: JSON.stringify({ requestId: createData.id }),
         });
         if (approveRes.ok) {
-          newResults[i] = { ok: true, requestId: createData.id, days: createData.amountRequested };
+          const humandDays = createData.amountRequested;
+          const expected = row.expectedDays;
+          const discrepancy = expected && humandDays && humandDays !== expected ? `Humand conto ${humandDays}, esperados: ${expected} ${row.countingMethod === "BUSINESS_DAYS" ? "habiles" : "corridos"}` : null;
+          newResults[i] = { ok: true, requestId: createData.id, days: humandDays, expectedDays: expected, discrepancy };
         } else {
           newResults[i] = { ok: false, error: "Creada pero no se pudo aprobar", requestId: createData.id };
         }
@@ -303,7 +333,7 @@ export default function ClientPage() {
     try {
       const exportRows = validatedRows.map((row, i) => {
         const r = newResults[i];
-        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Politica Resuelta": row.policyTypeName || "", Resultado: r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
+        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Politica Resuelta": row.policyTypeName || "", "Dias Esperados": row.expectedDays || "", "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Habiles" : "Corridos", "Dias Humand": r?.days || "", "Discrepancia": r?.discrepancy || "", Resultado: r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
       });
       const ws = XLSX.utils.json_to_sheet(exportRows);
       const wb = XLSX.utils.book_new();
@@ -337,6 +367,10 @@ export default function ClientPage() {
         "Email Resuelto": row.userEmail || "",
         "Match": row.matchMethod || "",
         "Politica Resuelta": row.policyTypeName || "",
+        "Dias Esperados": row.expectedDays || "",
+        "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Habiles" : "Corridos",
+        "Dias Humand": r?.days || "",
+        "Discrepancia": r?.discrepancy || "",
         Resultado: resultado,
       };
     });
@@ -579,10 +613,21 @@ export default function ClientPage() {
                               <td style={styles.td}>{row.policyTypeName || row.policyName}</td>
                               <td style={styles.td}>{row.fromDate || "?"}</td>
                               <td style={styles.td}>{row.toDate || "?"}</td>
-                              <td style={styles.td}>{row.days}</td>
+                              <td style={styles.td}>
+                                {row.expectedDays != null && (
+                                  <>
+                                    <div>{row.expectedDays}</div>
+                                    <div style={{ fontSize: 11, color: "#64748b" }}>{row.countingMethod === "BUSINESS_DAYS" ? "habiles" : "corridos"}</div>
+                                  </>
+                                )}
+                              </td>
                               <td style={styles.td}>
                                 {row.valid ? (
-                                  <span style={styles.badge.ok}>OK</span>
+                                  row.warnings?.length > 0 ? (
+                                    <span style={styles.badge.warning} title={row.warnings.join("\n")}>OK ({row.warnings[0]})</span>
+                                  ) : (
+                                    <span style={styles.badge.ok}>OK</span>
+                                  )
                                 ) : (
                                   <span style={styles.badge.error} title={row.errors.join("\n")}>
                                     {row.errors[0]}
@@ -630,6 +675,7 @@ export default function ClientPage() {
                       <th style={styles.th}>Politica</th>
                       <th style={styles.th}>Desde</th>
                       <th style={styles.th}>Hasta</th>
+                      <th style={styles.th}>Dias</th>
                       <th style={styles.th}>Resultado</th>
                     </tr>
                   </thead>
@@ -638,15 +684,26 @@ export default function ClientPage() {
                       const r = results[i];
                       const isProcessing = step === "executing" && i === currentIndex;
                       return (
-                        <tr key={i} style={{ backgroundColor: isProcessing ? "#fffbeb" : r?.ok ? "#f0fdf4" : r?.error ? "#fef2f2" : "#fff" }}>
+                        <tr key={i} style={{ backgroundColor: isProcessing ? "#fffbeb" : r?.discrepancy ? "#fffbeb" : r?.ok ? "#f0fdf4" : r?.error ? "#fef2f2" : "#fff" }}>
                           <td style={styles.td}>{i + 1}</td>
                           <td style={styles.td}>{row.email}</td>
                           <td style={styles.td}>{row.policyTypeName || row.policyName}</td>
                           <td style={styles.td}>{row.fromDate}</td>
                           <td style={styles.td}>{row.toDate}</td>
                           <td style={styles.td}>
+                            {r?.ok ? (
+                              <div>
+                                <div>{r.days}</div>
+                                {r.discrepancy && <div style={{ fontSize: 11, color: "#d97706" }}>Esperados: {r.expectedDays}</div>}
+                              </div>
+                            ) : row.expectedDays != null ? (
+                              <span>{row.expectedDays}</span>
+                            ) : ""}
+                          </td>
+                          <td style={styles.td}>
                             {isProcessing && <span style={{ color: "#d97706" }}>...</span>}
-                            {r?.ok && <span style={styles.badge.ok}>OK (#{r.requestId})</span>}
+                            {r?.ok && !r.discrepancy && <span style={styles.badge.ok}>OK (#{r.requestId})</span>}
+                            {r?.ok && r.discrepancy && <span style={styles.badge.warning} title={r.discrepancy}>OK (#{r.requestId}) — {r.discrepancy}</span>}
                             {r && !r.ok && <span style={styles.badge.error} title={r.error}>{r.skipped ? "Omitida" : r.error}</span>}
                           </td>
                         </tr>
