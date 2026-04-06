@@ -12,45 +12,24 @@ function slugify(name) {
     .replace(/^-|-$/g, "");
 }
 
-function getLocalClients() {
-  if (typeof window === "undefined") return [];
-  try {
-    return JSON.parse(localStorage.getItem("humand_clients") || "[]");
-  } catch {
-    return [];
-  }
-}
-
-function saveLocalClients(clients) {
-  localStorage.setItem("humand_clients", JSON.stringify(clients));
-}
-
 export default function Home() {
-  const [envClients, setEnvClients] = useState([]);
-  const [localClients, setLocalClients] = useState([]);
+  const [clients, setClients] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", apiKey: "", password: "" });
+  const [form, setForm] = useState({ name: "", apiKey: "", password: "", createdBy: "" });
   const [formError, setFormError] = useState("");
   const [formLoading, setFormLoading] = useState(false);
 
-  useEffect(() => {
-    fetch("/api/clients")
-      .then((r) => r.json())
-      .then(setEnvClients)
-      .finally(() => setLoading(false));
-    setLocalClients(getLocalClients());
-  }, []);
+  const loadClients = () =>
+    fetch("/api/clients").then((r) => r.json()).then(setClients).finally(() => setLoading(false));
 
-  const allClients = [
-    ...envClients.map((c) => ({ ...c, source: "env" })),
-    ...localClients.map((c) => ({ ...c, source: "local" })),
-  ];
+  useEffect(() => { loadClients(); }, []);
 
-  const filtered = allClients.filter((c) =>
+  const filtered = clients.filter((c) =>
     c.name.toLowerCase().includes(search.toLowerCase()) ||
-    c.slug.toLowerCase().includes(search.toLowerCase())
+    c.slug.toLowerCase().includes(search.toLowerCase()) ||
+    (c.createdBy || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const handleCreate = async () => {
@@ -58,42 +37,50 @@ export default function Home() {
     if (!form.name.trim()) return setFormError("El nombre es obligatorio");
     if (!form.apiKey.trim()) return setFormError("La API Key es obligatoria");
     if (!form.password.trim()) return setFormError("La contraseña es obligatoria");
+    if (!form.createdBy.trim()) return setFormError("Tu nombre es obligatorio");
     const slug = slugify(form.name);
     if (!slug) return setFormError("Nombre invalido");
-    if (allClients.some((c) => c.slug === slug)) return setFormError(`Ya existe un cliente con slug "${slug}"`);
 
     setFormLoading(true);
     try {
-      const res = await fetch("/api/auth", {
+      const authRes = await fetch("/api/auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ apiKey: form.apiKey.trim(), password: form.password.trim() }),
       });
-      const data = await res.json();
-      if (!res.ok) { setFormError(data.error); setFormLoading(false); return; }
+      const authData = await authRes.json();
+      if (!authRes.ok) { setFormError(authData.error); setFormLoading(false); return; }
 
-      const newClient = {
-        slug,
-        name: data.instanceName || form.name.trim(),
-        apiKey: form.apiKey.trim(),
-        jwtToken: data.jwtToken,
-        authUser: data.userName,
-      };
-      const updated = [...localClients, newClient];
-      saveLocalClients(updated);
-      setLocalClients(updated);
-      setForm({ name: "", apiKey: "", password: "" });
+      const createRes = await fetch("/api/clients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          slug,
+          name: authData.instanceName || form.name.trim(),
+          apiKey: form.apiKey.trim(),
+          jwtToken: authData.jwtToken,
+          createdBy: form.createdBy.trim(),
+        }),
+      });
+      const createData = await createRes.json();
+      if (!createRes.ok) { setFormError(createData.error); setFormLoading(false); return; }
+
+      setForm({ name: "", apiKey: "", password: "", createdBy: "" });
       setShowForm(false);
+      await loadClients();
     } catch (e) {
       setFormError("Error de conexion: " + e.message);
     }
     setFormLoading(false);
   };
 
-  const removeLocal = (slug) => {
-    const updated = localClients.filter((c) => c.slug !== slug);
-    saveLocalClients(updated);
-    setLocalClients(updated);
+  const handleDelete = async (slug) => {
+    await fetch("/api/clients", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slug }),
+    });
+    await loadClients();
   };
 
   return (
@@ -133,9 +120,7 @@ export default function Home() {
                   placeholder="Ej: Beyond Agency"
                   style={styles.input}
                 />
-                {form.name && (
-                  <span style={styles.slugPreview}>URL: /{slugify(form.name)}</span>
-                )}
+                {form.name && <span style={styles.slugPreview}>URL: /{slugify(form.name)}</span>}
               </div>
               <div style={styles.formGroup}>
                 <label style={styles.formLabel}>API Key *</label>
@@ -146,12 +131,7 @@ export default function Home() {
                   placeholder="API Key del usuario admin"
                   style={styles.input}
                 />
-                <a
-                  href="https://ops.humand.co/api-keys"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={styles.helpLink}
-                >
+                <a href="https://ops.humand.co/api-keys" target="_blank" rel="noopener noreferrer" style={styles.helpLink}>
                   Como crear un API Key
                 </a>
               </div>
@@ -164,9 +144,17 @@ export default function Home() {
                   placeholder="Contraseña del usuario admin en Humand"
                   style={styles.input}
                 />
-                <span style={styles.helpText}>
-                  La contraseña del usuario que creo la API Key. Se usa para autenticarse y no se almacena.
-                </span>
+                <span style={styles.helpText}>Se usa para autenticarse y no se almacena.</span>
+              </div>
+              <div style={styles.formGroup}>
+                <label style={styles.formLabel}>Tu nombre *</label>
+                <input
+                  type="text"
+                  value={form.createdBy}
+                  onChange={(e) => setForm({ ...form, createdBy: e.target.value })}
+                  placeholder="Ej: Manuel Borrescio"
+                  style={styles.input}
+                />
               </div>
               {formError && <p style={styles.formError}>{formError}</p>}
               <button style={{ ...styles.btnPrimary, opacity: formLoading ? 0.6 : 1 }} onClick={handleCreate} disabled={formLoading}>
@@ -184,10 +172,11 @@ export default function Home() {
           ) : (
             <div style={styles.grid}>
               {filtered.map((c) => (
-                <div key={`${c.source}-${c.slug}`} style={styles.cardRow}>
+                <div key={c.slug} style={styles.cardRow}>
                   <Link href={`/${c.slug}`} style={styles.card}>
                     <div>
                       <div style={styles.cardName}>{c.name}</div>
+                      {c.createdBy && <div style={styles.cardCreator}>por {c.createdBy}</div>}
                       {(() => {
                         const h = getHistory(c.slug);
                         if (h.length === 0) return null;
@@ -198,17 +187,10 @@ export default function Home() {
                     </div>
                     <div style={styles.cardMeta}>
                       <span style={styles.cardSlug}>/{c.slug}</span>
-                      {c.source === "local" && <span style={styles.localBadge}>local</span>}
                     </div>
                   </Link>
-                  {c.source === "local" && (
-                    <button
-                      style={styles.removeBtn}
-                      onClick={() => removeLocal(c.slug)}
-                      title="Eliminar"
-                    >
-                      x
-                    </button>
+                  {c.source === "blob" && (
+                    <button style={styles.removeBtn} onClick={() => handleDelete(c.slug)} title="Eliminar">x</button>
                   )}
                 </div>
               ))}
@@ -233,44 +215,16 @@ const styles = {
   subtitle: { fontSize: 14, color: "#64748b", margin: "8px 0 24px" },
   toolbar: { display: "flex", gap: 10, marginBottom: 16 },
   searchInput: {
-    flex: 1,
-    padding: "8px 12px",
-    border: "1px solid #cbd5e1",
-    borderRadius: 6,
-    fontSize: 14,
-    backgroundColor: "#fff",
-    outline: "none",
+    flex: 1, padding: "8px 12px", border: "1px solid #cbd5e1", borderRadius: 6, fontSize: 14, backgroundColor: "#fff", outline: "none",
   },
   btnPrimary: {
-    backgroundColor: "#2563eb",
-    color: "#fff",
-    border: "none",
-    borderRadius: 6,
-    padding: "8px 16px",
-    fontSize: 13,
-    fontWeight: 600,
-    cursor: "pointer",
-    whiteSpace: "nowrap",
+    backgroundColor: "#2563eb", color: "#fff", border: "none", borderRadius: 6, padding: "8px 16px", fontSize: 13, fontWeight: 600, cursor: "pointer", whiteSpace: "nowrap",
   },
-  formCard: {
-    backgroundColor: "#fff",
-    border: "1px solid #e2e8f0",
-    borderRadius: 8,
-    padding: 20,
-    marginBottom: 16,
-  },
+  formCard: { backgroundColor: "#fff", border: "1px solid #e2e8f0", borderRadius: 8, padding: 20, marginBottom: 16 },
   formTitle: { fontSize: 16, fontWeight: 600, color: "#0f172a", margin: "0 0 16px" },
   formGroup: { marginBottom: 14 },
   formLabel: { display: "block", fontSize: 13, fontWeight: 500, color: "#334155", marginBottom: 4 },
-  input: {
-    width: "100%",
-    padding: "8px 10px",
-    border: "1px solid #cbd5e1",
-    borderRadius: 6,
-    fontSize: 14,
-    backgroundColor: "#fff",
-    boxSizing: "border-box",
-  },
+  input: { width: "100%", padding: "8px 10px", border: "1px solid #cbd5e1", borderRadius: 6, fontSize: 14, backgroundColor: "#fff", boxSizing: "border-box" },
   slugPreview: { fontSize: 12, color: "#64748b", marginTop: 2, display: "block" },
   helpLink: { fontSize: 12, color: "#2563eb", textDecoration: "none", display: "inline-block", marginTop: 4 },
   helpText: { fontSize: 12, color: "#94a3b8", marginTop: 2, display: "block" },
@@ -280,35 +234,13 @@ const styles = {
   grid: { display: "flex", flexDirection: "column", gap: 6 },
   cardRow: { display: "flex", alignItems: "center", gap: 4 },
   card: {
-    flex: 1,
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    backgroundColor: "#fff",
-    border: "1px solid #e2e8f0",
-    borderRadius: 6,
-    padding: "10px 14px",
-    textDecoration: "none",
-    cursor: "pointer",
+    flex: 1, display: "flex", justifyContent: "space-between", alignItems: "center",
+    backgroundColor: "#fff", border: "1px solid #e2e8f0", borderRadius: 6, padding: "10px 14px", textDecoration: "none", cursor: "pointer",
   },
   cardName: { fontSize: 14, fontWeight: 600, color: "#0f172a" },
-  cardHistory: { fontSize: 11, color: "#64748b", marginTop: 2 },
+  cardCreator: { fontSize: 11, color: "#94a3b8", marginTop: 1 },
+  cardHistory: { fontSize: 11, color: "#64748b", marginTop: 1 },
   cardMeta: { display: "flex", alignItems: "center", gap: 8 },
   cardSlug: { fontSize: 12, color: "#94a3b8" },
-  localBadge: {
-    fontSize: 10,
-    color: "#64748b",
-    backgroundColor: "#f1f5f9",
-    padding: "1px 6px",
-    borderRadius: 4,
-    fontWeight: 500,
-  },
-  removeBtn: {
-    background: "none",
-    border: "none",
-    color: "#94a3b8",
-    fontSize: 14,
-    cursor: "pointer",
-    padding: "4px 8px",
-  },
+  removeBtn: { background: "none", border: "none", color: "#94a3b8", fontSize: 14, cursor: "pointer", padding: "4px 8px" },
 };

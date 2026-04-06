@@ -5,7 +5,7 @@ const API_BASE = "https://api-prod.humand.co/public/api/v1";
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-  const config = getClientConfig(req.query.client, req);
+  const config = await getClientConfig(req.query.client);
   if (!config) return res.status(404).json({ error: "Client not configured" });
 
   try {

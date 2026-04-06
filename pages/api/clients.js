@@ -1,4 +1,27 @@
-export function getClients() {
+import { put, list, head } from "@vercel/blob";
+
+const BLOB_KEY = "config/clients.json";
+
+async function readBlobClients() {
+  try {
+    const { blobs } = await list({ prefix: BLOB_KEY });
+    if (blobs.length === 0) return [];
+    const resp = await fetch(blobs[0].url);
+    return await resp.json();
+  } catch {
+    return [];
+  }
+}
+
+async function writeBlobClients(clients) {
+  await put(BLOB_KEY, JSON.stringify(clients), {
+    access: "public",
+    contentType: "application/json",
+    addRandomSuffix: false,
+  });
+}
+
+function getEnvClients() {
   const clients = [];
   const seen = new Set();
   for (const key of Object.keys(process.env)) {
@@ -9,36 +32,76 @@ export function getClients() {
       const name = process.env[`CLIENT_${slug}_NAME`];
       const hasApiKey = !!process.env[`CLIENT_${slug}_API_KEY`];
       if (name && hasApiKey) {
-        clients.push({ slug: slug.toLowerCase(), name });
+        clients.push({
+          slug: slug.toLowerCase(),
+          name,
+          apiKey: process.env[`CLIENT_${slug}_API_KEY`],
+          jwtToken: process.env[`CLIENT_${slug}_JWT_TOKEN`] || "",
+          source: "env",
+        });
       }
     }
   }
   return clients;
 }
 
-export function getClientConfig(clientSlug, req) {
+export async function getClientConfig(clientSlug) {
   // 1. Try env vars
-  const slug = clientSlug.toUpperCase();
-  const envApiKey = process.env[`CLIENT_${slug}_API_KEY`];
-  const envJwt = process.env[`CLIENT_${slug}_JWT_TOKEN`];
-  const envName = process.env[`CLIENT_${slug}_NAME`];
-  if (envApiKey) {
-    return { slug: clientSlug, name: envName || clientSlug, apiKey: envApiKey, jwtToken: envJwt || "" };
-  }
+  const envClients = getEnvClients();
+  const envMatch = envClients.find((c) => c.slug === clientSlug.toLowerCase());
+  if (envMatch) return envMatch;
 
-  // 2. Try headers (from localStorage clients)
-  if (req) {
-    const hApiKey = req.headers["x-humand-api-key"];
-    const hJwt = req.headers["x-humand-jwt-token"] || "";
-    if (hApiKey) {
-      return { slug: clientSlug, name: clientSlug, apiKey: hApiKey, jwtToken: hJwt };
-    }
-  }
-
-  return null;
+  // 2. Try Blob
+  const blobClients = await readBlobClients();
+  const blobMatch = blobClients.find((c) => c.slug === clientSlug.toLowerCase());
+  return blobMatch || null;
 }
 
-export default function handler(req, res) {
-  if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
-  res.status(200).json(getClients());
+export default async function handler(req, res) {
+  if (req.method === "GET") {
+    const { slug } = req.query;
+
+    if (slug) {
+      const config = await getClientConfig(slug);
+      if (!config) return res.status(404).json({ error: "Client not found" });
+      return res.status(200).json(config);
+    }
+
+    const envClients = getEnvClients().map((c) => ({
+      slug: c.slug, name: c.name, source: "env",
+    }));
+    const blobClients = (await readBlobClients()).map((c) => ({
+      slug: c.slug, name: c.name, createdBy: c.createdBy, createdAt: c.createdAt, source: "blob",
+    }));
+    return res.status(200).json([...envClients, ...blobClients]);
+  }
+
+  if (req.method === "POST") {
+    const { slug, name, apiKey, jwtToken, createdBy } = req.body;
+    if (!slug || !name || !apiKey) return res.status(400).json({ error: "slug, name y apiKey son obligatorios" });
+
+    const existing = await readBlobClients();
+    if (existing.some((c) => c.slug === slug)) return res.status(409).json({ error: "Ya existe una comunidad con ese slug" });
+
+    const envClients = getEnvClients();
+    if (envClients.some((c) => c.slug === slug)) return res.status(409).json({ error: "Ya existe una comunidad con ese slug" });
+
+    existing.push({ slug, name, apiKey, jwtToken: jwtToken || "", createdBy: createdBy || "", createdAt: new Date().toISOString() });
+    await writeBlobClients(existing);
+    return res.status(201).json({ success: true });
+  }
+
+  if (req.method === "DELETE") {
+    const { slug } = req.body;
+    if (!slug) return res.status(400).json({ error: "slug es obligatorio" });
+
+    const existing = await readBlobClients();
+    const filtered = existing.filter((c) => c.slug !== slug);
+    if (filtered.length === existing.length) return res.status(404).json({ error: "Comunidad no encontrada" });
+
+    await writeBlobClients(filtered);
+    return res.status(200).json({ success: true });
+  }
+
+  return res.status(405).json({ error: "Method not allowed" });
 }

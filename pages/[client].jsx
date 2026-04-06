@@ -104,20 +104,9 @@ function getPolicyBlockers(pt) {
   return { blockers, warnings };
 }
 
-function getLocalClient(slug) {
-  if (typeof window === "undefined") return null;
-  try {
-    const clients = JSON.parse(localStorage.getItem("humand_clients") || "[]");
-    return clients.find((c) => c.slug === slug) || null;
-  } catch {
-    return null;
-  }
-}
-
 export default function ClientPage() {
   const [clientSlug, setClientSlug] = useState(null);
   const [clientName, setClientName] = useState("");
-  const [credHeaders, setCredHeaders] = useState({});
   const [step, setStep] = useState("loading"); // loading | policies | upload | mapping | executing | done
   const [rows, setRows] = useState([]);
   const [headers, setHeaders] = useState([]);
@@ -139,26 +128,13 @@ export default function ClientPage() {
     const slug = window.location.pathname.replace("/", "");
     setClientSlug(slug);
 
-    // Build auth headers: env client needs none, local client passes creds
-    let authHeaders = {};
-    const local = getLocalClient(slug);
-    if (local) {
-      setClientName(local.name);
-      authHeaders = { "x-humand-api-key": local.apiKey };
-      if (local.jwtToken) authHeaders["x-humand-jwt-token"] = local.jwtToken;
-    } else {
-      fetch("/api/clients")
-        .then((r) => r.json())
-        .then((clients) => {
-          const c = clients.find((x) => x.slug === slug);
-          if (c) setClientName(c.name);
-        });
-    }
-    setCredHeaders(authHeaders);
+    fetch(`/api/clients?slug=${slug}`)
+      .then((r) => r.json())
+      .then((c) => { if (c.name) setClientName(c.name); });
 
     Promise.all([
-      fetch(`/api/${slug}/users`, { headers: authHeaders }).then((r) => r.json()),
-      fetch(`/api/${slug}/policy-types`, { headers: authHeaders }).then((r) => r.json()),
+      fetch(`/api/${slug}/users`).then((r) => r.json()),
+      fetch(`/api/${slug}/policy-types`).then((r) => r.json()),
     ]).then(([usersRes, ptRes]) => {
       if (usersRes.error) { setLoadError(usersRes.details || usersRes.error); setStep("policies"); return; }
       setUsers(Array.isArray(usersRes) ? usersRes : []);
@@ -265,7 +241,7 @@ export default function ClientPage() {
       try {
         const createRes = await fetch(`/api/${clientSlug}/create`, {
           method: "POST",
-          headers: { "Content-Type": "application/json", ...credHeaders },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             issuerId: row.userId,
             policyTypeId: row.policyTypeId,
@@ -281,7 +257,7 @@ export default function ClientPage() {
         }
         const approveRes = await fetch(`/api/${clientSlug}/approve`, {
           method: "PUT",
-          headers: { "Content-Type": "application/json", ...credHeaders },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ requestId: createData.id }),
         });
         if (approveRes.ok) {
