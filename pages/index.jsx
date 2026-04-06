@@ -189,9 +189,6 @@ export default function Home() {
                       <span style={styles.cardSlug}>/{c.slug}</span>
                     </div>
                   </Link>
-                  {c.source === "blob" && (
-                    <button style={styles.removeBtn} onClick={() => handleDelete(c.slug)} title="Eliminar">x</button>
-                  )}
                 </div>
               ))}
             </div>
