@@ -18,6 +18,7 @@ async function writeBlobClients(clients) {
     access: "public",
     contentType: "application/json",
     addRandomSuffix: false,
+    allowOverwrite: true,
   });
 }
 
