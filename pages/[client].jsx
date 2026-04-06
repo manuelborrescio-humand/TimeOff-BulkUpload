@@ -148,10 +148,16 @@ export default function ClientPage() {
     (file) => {
       if (!file) return;
       setFileName(file.name);
+      const isCsv = /\.(csv|tsv|txt)$/i.test(file.name);
       const reader = new FileReader();
       reader.onload = (e) => {
-        const data = new Uint8Array(e.target.result);
-        const wb = XLSX.read(data, { type: "array", cellDates: true });
+        let wb;
+        if (isCsv) {
+          wb = XLSX.read(e.target.result, { type: "string", cellDates: true });
+        } else {
+          const data = new Uint8Array(e.target.result);
+          wb = XLSX.read(data, { type: "array", cellDates: true });
+        }
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const json = XLSX.utils.sheet_to_json(sheet, { defval: "" });
         if (json.length === 0) return;
@@ -168,7 +174,11 @@ export default function ClientPage() {
         setColumnMap(map);
         setStep("mapping");
       };
-      reader.readAsArrayBuffer(file);
+      if (isCsv) {
+        reader.readAsText(file, "UTF-8");
+      } else {
+        reader.readAsArrayBuffer(file);
+      }
     },
     []
   );
