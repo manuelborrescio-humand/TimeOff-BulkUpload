@@ -154,6 +154,9 @@ export default function ClientPage() {
   const [tokenStatus, setTokenStatus] = useState(null); // 'ok', 'expiring', 'expired'
   const [authErrorCount, setAuthErrorCount] = useState(0);
   
+  // Estado para exportación consolidada
+  const [exporting, setExporting] = useState(false);
+  
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -221,6 +224,104 @@ export default function ClientPage() {
       setRefreshError("Error de conexión: " + err.message);
     }
     setRefreshing(false);
+  };
+
+  const exportConsolidated = async () => {
+    const entriesWithBlob = history.filter((e) => e.blobUrl && e.successCount > 0);
+    if (entriesWithBlob.length === 0) {
+      alert("No hay cargas exitosas para exportar.");
+      return;
+    }
+
+    setExporting(true);
+    const allSuccessRows = [];
+
+    try {
+      for (const entry of entriesWithBlob) {
+        try {
+          const response = await fetch(entry.blobUrl);
+          if (!response.ok) continue;
+          
+          const arrayBuffer = await response.arrayBuffer();
+          const data = new Uint8Array(arrayBuffer);
+          const workbook = XLSX.read(data, { type: "array" });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+          
+          // Filtrar solo las filas exitosas (resultado empieza con "OK")
+          const successRows = rows.filter((row) => {
+            const resultado = (row.Resultado || "").toString();
+            return resultado.startsWith("OK");
+          });
+          
+          // Agregar metadata de la carga
+          for (const row of successRows) {
+            // Extraer el Request ID del resultado "OK (#123456)"
+            const match = (row.Resultado || "").match(/OK \(#(\d+)\)/);
+            const requestId = match ? match[1] : "";
+            
+            allSuccessRows.push({
+              "Fecha de Carga": new Date(entry.timestamp).toLocaleString("es-AR", { 
+                day: "2-digit", month: "2-digit", year: "numeric", 
+                hour: "2-digit", minute: "2-digit" 
+              }),
+              "Archivo Origen": entry.fileName,
+              "Usuario": row["Usuario Resuelto"] || row.Usuario || "",
+              "Email": row["Email Resuelto"] || "",
+              "Política": row["Política Resuelta"] || row.Politicas || "",
+              "Fecha Inicio": row["Día de Inicio"] || row["Fecha Inicio"] || "",
+              "Fecha Fin": row["Día de fin"] || row["Fecha Fin"] || "",
+              "Días": row["Días Humand"] || row["Días Esperados"] || "",
+              "Conteo": row.Conteo || "",
+              "Request ID": requestId,
+            });
+          }
+        } catch (err) {
+          console.error(`Error procesando ${entry.fileName}:`, err);
+        }
+      }
+
+      if (allSuccessRows.length === 0) {
+        alert("No se encontraron registros exitosos en los archivos.");
+        setExporting(false);
+        return;
+      }
+
+      // Ordenar por fecha de carga (más reciente primero)
+      allSuccessRows.sort((a, b) => {
+        const dateA = new Date(a["Fecha de Carga"].split(",")[0].split("/").reverse().join("-"));
+        const dateB = new Date(b["Fecha de Carga"].split(",")[0].split("/").reverse().join("-"));
+        return dateB - dateA;
+      });
+
+      // Crear el Excel consolidado
+      const ws = XLSX.utils.json_to_sheet(allSuccessRows);
+      
+      // Ajustar anchos de columna
+      ws["!cols"] = [
+        { wch: 20 }, // Fecha de Carga
+        { wch: 35 }, // Archivo Origen
+        { wch: 25 }, // Usuario
+        { wch: 30 }, // Email
+        { wch: 20 }, // Política
+        { wch: 12 }, // Fecha Inicio
+        { wch: 12 }, // Fecha Fin
+        { wch: 6 },  // Días
+        { wch: 10 }, // Conteo
+        { wch: 12 }, // Request ID
+      ];
+      
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Ausencias Cargadas");
+      
+      const fileName = `ausencias-consolidado-${clientSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      XLSX.writeFile(wb, fileName);
+      
+    } catch (err) {
+      alert("Error al exportar: " + err.message);
+    }
+    
+    setExporting(false);
   };
 
   const handleFile = useCallback(
@@ -676,6 +777,20 @@ export default function ClientPage() {
                           ))}
                       </tbody>
                     </table>
+                  </div>
+                  {/* Resumen y botón de exportar */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16, paddingTop: 16, borderTop: "1px solid #e2e8f0" }}>
+                    <div style={{ fontSize: 13, color: "#64748b" }}>
+                      Total: <strong style={{ color: "#166534" }}>{history.reduce((sum, e) => sum + (e.successCount || 0), 0)}</strong> exitosas, {" "}
+                      <strong style={{ color: "#991b1b" }}>{history.reduce((sum, e) => sum + (e.errorCount || 0), 0)}</strong> errores
+                    </div>
+                    <button 
+                      style={{ ...styles.btnSecondary, opacity: exporting ? 0.6 : 1 }} 
+                      onClick={exportConsolidated}
+                      disabled={exporting}
+                    >
+                      {exporting ? "Exportando..." : "📥 Exportar todo (.xlsx)"}
+                    </button>
                   </div>
                 </div>
               )}
