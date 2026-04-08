@@ -67,19 +67,15 @@ function findUser(input, users) {
   const val = normalizeStr(input);
   if (!val) return { user: null, method: null };
 
-  // 1. Exact email match
   const byEmail = users.find((u) => normalizeStr(u.email) === val);
   if (byEmail) return { user: byEmail, method: "email" };
 
-  // 2. Exact employeeInternalId match
   const byIntId = users.find((u) => normalizeStr(u.employeeInternalId) === val);
   if (byIntId) return { user: byIntId, method: "internalId" };
 
-  // 3. Exact nickname match
   const byNick = users.find((u) => u.nickname && normalizeStr(u.nickname) === val);
   if (byNick) return { user: byNick, method: "nickname" };
 
-  // 4. Exact full name match: "firstName lastName" or "lastName firstName"
   const byFullName = users.find((u) => {
     const fn = normalizeStr(u.firstName);
     const ln = normalizeStr(u.lastName);
@@ -87,7 +83,6 @@ function findUser(input, users) {
   });
   if (byFullName) return { user: byFullName, method: "nombre completo" };
 
-  // 5. Partial: input contains both firstName and lastName (any order)
   const byParts = users.filter((u) => {
     const fn = normalizeStr(u.firstName);
     const ln = normalizeStr(u.lastName);
@@ -100,7 +95,6 @@ function findUser(input, users) {
   if (byParts.length === 1) return { user: byParts[0], method: "nombre parcial" };
   if (byParts.length > 1) return { user: null, method: null, ambiguous: byParts.map((u) => `${u.firstName} ${u.lastName} (${u.email})`) };
 
-  // 6. Email prefix match (before @)
   const valPrefix = val.split("@")[0];
   if (valPrefix && valPrefix.length > 2) {
     const byPrefix = users.find((u) => {
@@ -117,16 +111,26 @@ function getPolicyBlockers(pt) {
   const blockers = [];
   const warnings = [];
   if (pt.noRetroactiveRequests) blockers.push("No permite solicitudes retroactivas");
-  if (pt.minimumAdvanceDays && pt.minimumAdvanceDays > 0) blockers.push(`Requiere ${pt.minimumAdvanceDays} dias de anticipacion`);
-  if (pt.minimumAmountPerRequest && pt.minimumAmountPerRequest > 1) warnings.push(`Minimo ${pt.minimumAmountPerRequest} dias por solicitud`);
-  if (pt.maximumAmountPerRequest) warnings.push(`Maximo ${pt.maximumAmountPerRequest} dias por solicitud`);
+  if (pt.minimumAdvanceDays && pt.minimumAdvanceDays > 0) blockers.push(`Requiere ${pt.minimumAdvanceDays} días de anticipación`);
+  if (pt.minimumAmountPerRequest && pt.minimumAmountPerRequest > 1) warnings.push(`Mínimo ${pt.minimumAmountPerRequest} días por solicitud`);
+  if (pt.maximumAmountPerRequest) warnings.push(`Máximo ${pt.maximumAmountPerRequest} días por solicitud`);
   return { blockers, warnings };
+}
+
+// Detectar si un error indica token expirado
+function isAuthError(error) {
+  const msg = (error || "").toLowerCase();
+  return msg.includes("client not configured") || 
+         msg.includes("unauthorized") || 
+         msg.includes("token") ||
+         msg.includes("401") ||
+         msg.includes("403");
 }
 
 export default function ClientPage() {
   const [clientSlug, setClientSlug] = useState(null);
   const [clientName, setClientName] = useState("");
-  const [step, setStep] = useState("loading"); // loading | policies | upload | mapping | executing | done
+  const [step, setStep] = useState("loading");
   const [rows, setRows] = useState([]);
   const [headers, setHeaders] = useState([]);
   const [columnMap, setColumnMap] = useState({});
@@ -141,6 +145,15 @@ export default function ClientPage() {
   const [loadError, setLoadError] = useState("");
   const [fileName, setFileName] = useState("");
   const [history, setHistory] = useState([]);
+  
+  // Estados para refresh de token
+  const [showRefreshModal, setShowRefreshModal] = useState(false);
+  const [refreshPassword, setRefreshPassword] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshError, setRefreshError] = useState("");
+  const [tokenStatus, setTokenStatus] = useState(null); // 'ok', 'expiring', 'expired'
+  const [authErrorCount, setAuthErrorCount] = useState(0);
+  
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -149,7 +162,21 @@ export default function ClientPage() {
 
     fetch(`/api/clients?slug=${slug}`)
       .then((r) => r.json())
-      .then((c) => { if (c.name) setClientName(c.name); });
+      .then((c) => { 
+        if (c.name) setClientName(c.name);
+        // Verificar estado del token
+        if (c.jwtRefreshedAt) {
+          const refreshedAt = new Date(c.jwtRefreshedAt);
+          const hoursSinceRefresh = (Date.now() - refreshedAt.getTime()) / (1000 * 60 * 60);
+          if (hoursSinceRefresh > 1) {
+            setTokenStatus('expired');
+          } else if (hoursSinceRefresh > 0.75) {
+            setTokenStatus('expiring');
+          } else {
+            setTokenStatus('ok');
+          }
+        }
+      });
 
     Promise.all([
       fetch(`/api/${slug}/users`).then((r) => r.json()),
@@ -162,6 +189,39 @@ export default function ClientPage() {
       setHistory(getHistory(slug));
     }).catch((e) => { setLoadError(e.message); setStep("policies"); setHistory(getHistory(slug)); });
   }, []);
+
+  const handleRefreshToken = async () => {
+    if (!refreshPassword.trim()) {
+      setRefreshError("La contraseña es obligatoria");
+      return;
+    }
+    setRefreshing(true);
+    setRefreshError("");
+    
+    try {
+      const res = await fetch(`/api/${clientSlug}/refresh-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: refreshPassword }),
+      });
+      const data = await res.json();
+      
+      if (!res.ok) {
+        setRefreshError(data.error || "Error al refrescar token");
+        setRefreshing(false);
+        return;
+      }
+      
+      setTokenStatus('ok');
+      setShowRefreshModal(false);
+      setRefreshPassword("");
+      setAuthErrorCount(0);
+      alert("✅ Token refrescado exitosamente. Ya puedes continuar con la carga.");
+    } catch (err) {
+      setRefreshError("Error de conexión: " + err.message);
+    }
+    setRefreshing(false);
+  };
 
   const handleFile = useCallback(
     (file) => {
@@ -220,24 +280,24 @@ export default function ClientPage() {
       const pt = policyTypes.find((p) => normalizeStr(p.policyTypeName) === policyName || normalizeStr(p.policyName) === policyName);
       const errors = [];
       const warnings = [];
-      if (!userInput) errors.push("Usuario vacio");
+      if (!userInput) errors.push("Usuario vacío");
       else if (ambiguous) errors.push(`Ambiguo: ${ambiguous.join(", ")}`);
       else if (!user) errors.push(`Usuario "${userInput}" no encontrado`);
       else if (matchMethod && matchMethod !== "email") warnings.push(`Match por ${matchMethod}`);
-      if (!policyName) errors.push("Politica vacia");
-      else if (!pt) errors.push(`Tipo de politica "${row[columnMap.policy]}" no encontrado`);
-      if (!fromDate) errors.push("Fecha inicio invalida");
-      if (!toDate) errors.push("Fecha fin invalida");
+      if (!policyName) errors.push("Política vacía");
+      else if (!pt) errors.push(`Tipo de política "${row[columnMap.policy]}" no encontrado`);
+      if (!fromDate) errors.push("Fecha inicio inválida");
+      if (!toDate) errors.push("Fecha fin inválida");
       if (fromDate && toDate && fromDate > toDate) errors.push("Fecha inicio > fecha fin");
       if (pt) {
         const { blockers } = getPolicyBlockers(pt);
-        if (blockers.length > 0) errors.push(`Politica bloqueada: ${blockers[0]}`);
+        if (blockers.length > 0) errors.push(`Política bloqueada: ${blockers[0]}`);
       }
       const cm = pt?.countingMethod || "CALENDAR_DAYS";
       const expectedDays = countDays(fromDate, toDate, cm);
       const excelDays = row[columnMap.days] ? Number(row[columnMap.days]) : null;
       if (expectedDays && excelDays && excelDays !== expectedDays) {
-        warnings.push(`Excel dice ${excelDays} dias, calculados: ${expectedDays} ${cm === "BUSINESS_DAYS" ? "habiles" : "corridos"}`);
+        warnings.push(`Excel dice ${excelDays} días, calculados: ${expectedDays} ${cm === "BUSINESS_DAYS" ? "hábiles" : "corridos"}`);
       }
       return {
         raw: row,
@@ -266,7 +326,10 @@ export default function ClientPage() {
   const executeAll = async () => {
     setProcessing(true);
     setStep("executing");
+    setAuthErrorCount(0);
     const newResults = {};
+    let consecutiveAuthErrors = 0;
+    
     for (let i = 0; i < validatedRows.length; i++) {
       const row = validatedRows[i];
       if (!row.valid) {
@@ -274,6 +337,17 @@ export default function ClientPage() {
         setResults({ ...newResults });
         continue;
       }
+      
+      // Si hay muchos errores de auth consecutivos, pausar y pedir refresh
+      if (consecutiveAuthErrors >= 3) {
+        setTokenStatus('expired');
+        setShowRefreshModal(true);
+        setProcessing(false);
+        // Guardar progreso parcial
+        setResults({ ...newResults });
+        return;
+      }
+      
       setCurrentIndex(i);
       try {
         const createRes = await fetch(`/api/${clientSlug}/create`, {
@@ -287,23 +361,45 @@ export default function ClientPage() {
           }),
         });
         const createData = await createRes.json();
+        
         if (!createRes.ok) {
-          newResults[i] = { ok: false, error: createData.error || "Error al crear" };
+          const errorMsg = createData.error || "Error al crear";
+          newResults[i] = { ok: false, error: errorMsg };
+          
+          // Detectar error de autenticación
+          if (isAuthError(errorMsg)) {
+            consecutiveAuthErrors++;
+            setAuthErrorCount((prev) => prev + 1);
+          } else {
+            consecutiveAuthErrors = 0;
+          }
+          
           setResults({ ...newResults });
           continue;
         }
+        
+        consecutiveAuthErrors = 0; // Reset si create fue exitoso
+        
         const approveRes = await fetch(`/api/${clientSlug}/approve`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ requestId: createData.id }),
         });
+        
         if (approveRes.ok) {
           const humandDays = createData.amountRequested;
           const expected = row.expectedDays;
-          const discrepancy = expected && humandDays && humandDays !== expected ? `Humand conto ${humandDays}, esperados: ${expected} ${row.countingMethod === "BUSINESS_DAYS" ? "habiles" : "corridos"}` : null;
+          const discrepancy = expected && humandDays && humandDays !== expected ? `Humand contó ${humandDays}, esperados: ${expected} ${row.countingMethod === "BUSINESS_DAYS" ? "hábiles" : "corridos"}` : null;
           newResults[i] = { ok: true, requestId: createData.id, days: humandDays, expectedDays: expected, discrepancy };
         } else {
-          newResults[i] = { ok: false, error: "Creada pero no se pudo aprobar", requestId: createData.id };
+          const approveData = await approveRes.json().catch(() => ({}));
+          const errorMsg = approveData.error || "Creada pero no se pudo aprobar";
+          newResults[i] = { ok: false, error: errorMsg, requestId: createData.id };
+          
+          if (isAuthError(errorMsg)) {
+            consecutiveAuthErrors++;
+            setAuthErrorCount((prev) => prev + 1);
+          }
         }
       } catch (err) {
         newResults[i] = { ok: false, error: err.message };
@@ -329,11 +425,10 @@ export default function ClientPage() {
     });
     setHistory(getHistory(clientSlug));
 
-    // Upload results Excel to Vercel Blob in background
     try {
       const exportRows = validatedRows.map((row, i) => {
         const r = newResults[i];
-        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Politica Resuelta": row.policyTypeName || "", "Dias Esperados": row.expectedDays || "", "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Habiles" : "Corridos", "Dias Humand": r?.days || "", "Discrepancia": r?.discrepancy || "", Resultado: r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
+        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Política Resuelta": row.policyTypeName || "", "Días Esperados": row.expectedDays || "", "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Hábiles" : "Corridos", "Días Humand": r?.days || "", "Discrepancia": r?.discrepancy || "", Resultado: r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
       });
       const ws = XLSX.utils.json_to_sheet(exportRows);
       const wb = XLSX.utils.book_new();
@@ -366,10 +461,10 @@ export default function ClientPage() {
         "Usuario Resuelto": row.userName || "",
         "Email Resuelto": row.userEmail || "",
         "Match": row.matchMethod || "",
-        "Politica Resuelta": row.policyTypeName || "",
-        "Dias Esperados": row.expectedDays || "",
-        "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Habiles" : "Corridos",
-        "Dias Humand": r?.days || "",
+        "Política Resuelta": row.policyTypeName || "",
+        "Días Esperados": row.expectedDays || "",
+        "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Hábiles" : "Corridos",
+        "Días Humand": r?.days || "",
         "Discrepancia": r?.discrepancy || "",
         Resultado: resultado,
       };
@@ -385,44 +480,111 @@ export default function ClientPage() {
       <Head>
         <title>{clientName || clientSlug} - Cargador de Ausencias</title>
       </Head>
+      
+      {/* Modal de refresh de token */}
+      {showRefreshModal && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modal}>
+            <h3 style={styles.modalTitle}>🔐 Sesión expirada</h3>
+            <p style={styles.modalText}>
+              El token de autenticación ha expirado. Ingresa tu contraseña de Humand para continuar.
+            </p>
+            <div style={styles.formGroup}>
+              <label style={styles.formLabel}>Contraseña de Humand</label>
+              <input
+                type="password"
+                value={refreshPassword}
+                onChange={(e) => setRefreshPassword(e.target.value)}
+                placeholder="Tu contraseña de Humand"
+                style={styles.input}
+                onKeyDown={(e) => e.key === "Enter" && handleRefreshToken()}
+              />
+            </div>
+            {refreshError && <p style={styles.formError}>{refreshError}</p>}
+            <div style={styles.modalActions}>
+              <button 
+                style={styles.btnSecondary} 
+                onClick={() => { setShowRefreshModal(false); setStep("done"); }}
+              >
+                Cancelar
+              </button>
+              <button 
+                style={{ ...styles.btnPrimary, opacity: refreshing ? 0.6 : 1 }} 
+                onClick={handleRefreshToken}
+                disabled={refreshing}
+              >
+                {refreshing ? "Refrescando..." : "Refrescar y continuar"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
       <div style={styles.container}>
         <div style={styles.content}>
           <div style={styles.header}>
             <Link href="/" style={styles.back}>
               ← Volver
             </Link>
-            <h1 style={styles.title}>{clientName || clientSlug}</h1>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <h1 style={styles.title}>{clientName || clientSlug}</h1>
+              {tokenStatus === 'expired' && (
+                <span style={styles.tokenBadgeExpired} onClick={() => setShowRefreshModal(true)}>
+                  ⚠️ Token expirado
+                </span>
+              )}
+              {tokenStatus === 'expiring' && (
+                <span style={styles.tokenBadgeExpiring} onClick={() => setShowRefreshModal(true)}>
+                  ⏰ Token por expirar
+                </span>
+              )}
+            </div>
             <p style={styles.subtitle}>Carga masiva de ausencias/vacaciones</p>
           </div>
 
           {step === "loading" && (
             <div style={styles.section}>
-              <p style={styles.loading}>Cargando informacion de la comunidad...</p>
+              <p style={styles.loading}>Cargando información de la comunidad...</p>
             </div>
           )}
 
           {step === "policies" && (
             <>
+              {/* Alerta de token expirado */}
+              {tokenStatus === 'expired' && (
+                <div style={styles.tokenAlert}>
+                  <div>
+                    <strong>⚠️ Token de sesión expirado</strong>
+                    <p style={{ margin: "4px 0 0", fontSize: 13 }}>
+                      El token de autenticación ha expirado. Refresca el token antes de cargar ausencias para evitar errores.
+                    </p>
+                  </div>
+                  <button style={styles.btnWarning} onClick={() => setShowRefreshModal(true)}>
+                    Refrescar token
+                  </button>
+                </div>
+              )}
+              
               <div style={styles.section}>
-                <h2 style={styles.sectionTitle}>Politicas de ausencia ({policyTypes.length})</h2>
+                <h2 style={styles.sectionTitle}>Políticas de ausencia ({policyTypes.length})</h2>
                 {loadError && (
                   <div style={styles.blockerNote}>Error al cargar datos: {loadError}</div>
                 )}
                 {!loadError && policyTypes.length === 0 ? (
-                  <p style={{ color: "#991b1b", fontSize: 14 }}>No se encontraron politicas. Verifica que la API Key sea valida.</p>
+                  <p style={{ color: "#991b1b", fontSize: 14 }}>No se encontraron políticas. Verifica que la API Key sea válida.</p>
                 ) : (
                   <div style={{ overflowX: "auto" }}>
                     <table style={styles.table}>
                       <thead>
                         <tr>
-                          <th style={styles.th}>Tipo de Politica</th>
-                          <th style={styles.th}>Politica</th>
+                          <th style={styles.th}>Tipo de Política</th>
+                          <th style={styles.th}>Política</th>
                           <th style={styles.th}>Usuarios</th>
                           <th style={styles.th}>Conteo</th>
-                          <th style={styles.th}>Min dias</th>
-                          <th style={styles.th}>Max dias</th>
+                          <th style={styles.th}>Min días</th>
+                          <th style={styles.th}>Max días</th>
                           <th style={styles.th}>Retroactivo</th>
-                          <th style={styles.th}>Anticipacion</th>
+                          <th style={styles.th}>Anticipación</th>
                           <th style={styles.th}>Estado</th>
                         </tr>
                       </thead>
@@ -435,13 +597,13 @@ export default function ClientPage() {
                               <td style={styles.td}><strong>{pt.policyTypeName}</strong></td>
                               <td style={styles.td}>{pt.policyName}</td>
                               <td style={styles.td}>{pt.userCount}</td>
-                              <td style={styles.td}>{pt.countingMethod === "CALENDAR_DAYS" ? "Corridos" : "Habiles"}</td>
+                              <td style={styles.td}>{pt.countingMethod === "CALENDAR_DAYS" ? "Corridos" : "Hábiles"}</td>
                               <td style={styles.td}>{pt.minimumAmountPerRequest || "-"}</td>
-                              <td style={styles.td}>{pt.maximumAmountPerRequest || "Sin limite"}</td>
+                              <td style={styles.td}>{pt.maximumAmountPerRequest || "Sin límite"}</td>
                               <td style={{ ...styles.td, color: pt.noRetroactiveRequests ? "#991b1b" : "#166534", fontWeight: 600 }}>
-                                {pt.noRetroactiveRequests ? "NO" : "SI"}
+                                {pt.noRetroactiveRequests ? "NO" : "SÍ"}
                               </td>
-                              <td style={styles.td}>{pt.minimumAdvanceDays ? `${pt.minimumAdvanceDays} dias` : "Ninguna"}</td>
+                              <td style={styles.td}>{pt.minimumAdvanceDays ? `${pt.minimumAdvanceDays} días` : "Ninguna"}</td>
                               <td style={styles.td}>
                                 {hasBlocker ? (
                                   <span style={styles.badge.error} title={blockers.join("\n")}>BLOQUEADA</span>
@@ -460,8 +622,8 @@ export default function ClientPage() {
                 )}
                 {policyTypes.some((pt) => getPolicyBlockers(pt).blockers.length > 0) && (
                   <div style={styles.blockerNote}>
-                    Las politicas marcadas como BLOQUEADA no permiten crear ausencias en el pasado.
-                    Desactiva "No permitir solicitudes retroactivas" y/o "Dias minimos de anticipacion" en la configuracion de la politica desde el panel de Humand antes de continuar.
+                    Las políticas marcadas como BLOQUEADA no permiten crear ausencias en el pasado.
+                    Desactiva "No permitir solicitudes retroactivas" y/o "Días mínimos de anticipación" en la configuración de la política desde el panel de Humand antes de continuar.
                   </div>
                 )}
               </div>
@@ -519,6 +681,9 @@ export default function ClientPage() {
               )}
 
               <div style={styles.actions}>
+                <button style={styles.btnSecondary} onClick={() => setShowRefreshModal(true)}>
+                  🔐 Refrescar token
+                </button>
                 <button style={styles.btnPrimary} onClick={() => setStep("upload")}>
                   Continuar a carga de archivo
                 </button>
@@ -543,10 +708,10 @@ export default function ClientPage() {
               />
               <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
               <p style={{ margin: 0, fontWeight: 600, color: "#334155" }}>
-                Arrastra un archivo Excel o CSV aqui
+                Arrastra un archivo Excel o CSV aquí
               </p>
               <p style={{ margin: "4px 0 0", fontSize: 13, color: "#94a3b8" }}>
-                o haz click para seleccionar
+                o haz clic para seleccionar
               </p>
             </div>
           )}
@@ -556,7 +721,7 @@ export default function ClientPage() {
               <div style={styles.section}>
                 <h2 style={styles.sectionTitle}>Mapeo de columnas</h2>
                 <div style={styles.mappingGrid}>
-                  {Object.entries({ email: "Usuario (email/nombre)", policy: "Politica", fromDate: "Fecha inicio", toDate: "Fecha fin", days: "Dias (info)" }).map(
+                  {Object.entries({ email: "Usuario (email/nombre)", policy: "Política", fromDate: "Fecha inicio", toDate: "Fecha fin", days: "Días (info)" }).map(
                     ([key, label]) => (
                       <div key={key} style={styles.mappingRow}>
                         <label style={styles.mappingLabel}>{label}</label>
@@ -578,13 +743,13 @@ export default function ClientPage() {
                 </div>
               </div>
 
-              {loadingMeta && <p style={styles.loading}>Cargando usuarios y politicas del cliente...</p>}
+              {loadingMeta && <p style={styles.loading}>Cargando usuarios y políticas del cliente...</p>}
 
               {!loadingMeta && validatedRows.length > 0 && (
                 <>
                   <div style={styles.section}>
                     <h2 style={styles.sectionTitle}>
-                      Vista previa ({validCount} validas de {validatedRows.length})
+                      Vista previa ({validCount} válidas de {validatedRows.length})
                     </h2>
                     <div style={{ overflowX: "auto" }}>
                       <table style={styles.table}>
@@ -592,10 +757,10 @@ export default function ClientPage() {
                           <tr>
                             <th style={styles.th}>#</th>
                             <th style={styles.th}>Usuario</th>
-                            <th style={styles.th}>Politica</th>
+                            <th style={styles.th}>Política</th>
                             <th style={styles.th}>Desde</th>
                             <th style={styles.th}>Hasta</th>
-                            <th style={styles.th}>Dias</th>
+                            <th style={styles.th}>Días</th>
                             <th style={styles.th}>Estado</th>
                           </tr>
                         </thead>
@@ -617,7 +782,7 @@ export default function ClientPage() {
                                 {row.expectedDays != null && (
                                   <>
                                     <div>{row.expectedDays}</div>
-                                    <div style={{ fontSize: 11, color: "#64748b" }}>{row.countingMethod === "BUSINESS_DAYS" ? "habiles" : "corridos"}</div>
+                                    <div style={{ fontSize: 11, color: "#64748b" }}>{row.countingMethod === "BUSINESS_DAYS" ? "hábiles" : "corridos"}</div>
                                   </>
                                 )}
                               </td>
@@ -659,6 +824,11 @@ export default function ClientPage() {
               <h2 style={styles.sectionTitle}>
                 {step === "executing" ? `Procesando ${currentIndex + 1} de ${validatedRows.length}...` : "Resultado"}
               </h2>
+              {authErrorCount > 0 && step === "executing" && (
+                <div style={styles.authWarning}>
+                  ⚠️ Se detectaron {authErrorCount} errores de autenticación. El token puede estar expirando.
+                </div>
+              )}
               {step === "done" && (
                 <div style={styles.summary}>
                   {successCount > 0 && <span style={styles.summaryOk}>{successCount} creadas</span>}
@@ -672,10 +842,10 @@ export default function ClientPage() {
                     <tr>
                       <th style={styles.th}>#</th>
                       <th style={styles.th}>Usuario</th>
-                      <th style={styles.th}>Politica</th>
+                      <th style={styles.th}>Política</th>
                       <th style={styles.th}>Desde</th>
                       <th style={styles.th}>Hasta</th>
-                      <th style={styles.th}>Dias</th>
+                      <th style={styles.th}>Días</th>
                       <th style={styles.th}>Resultado</th>
                     </tr>
                   </thead>
@@ -683,8 +853,9 @@ export default function ClientPage() {
                     {validatedRows.map((row, i) => {
                       const r = results[i];
                       const isProcessing = step === "executing" && i === currentIndex;
+                      const isAuthErr = r && !r.ok && isAuthError(r.error);
                       return (
-                        <tr key={i} style={{ backgroundColor: isProcessing ? "#fffbeb" : r?.discrepancy ? "#fffbeb" : r?.ok ? "#f0fdf4" : r?.error ? "#fef2f2" : "#fff" }}>
+                        <tr key={i} style={{ backgroundColor: isProcessing ? "#fffbeb" : isAuthErr ? "#fef2f2" : r?.discrepancy ? "#fffbeb" : r?.ok ? "#f0fdf4" : r?.error ? "#fef2f2" : "#fff" }}>
                           <td style={styles.td}>{i + 1}</td>
                           <td style={styles.td}>{row.email}</td>
                           <td style={styles.td}>{row.policyTypeName || row.policyName}</td>
@@ -704,7 +875,11 @@ export default function ClientPage() {
                             {isProcessing && <span style={{ color: "#d97706" }}>...</span>}
                             {r?.ok && !r.discrepancy && <span style={styles.badge.ok}>OK (#{r.requestId})</span>}
                             {r?.ok && r.discrepancy && <span style={styles.badge.warning} title={r.discrepancy}>OK (#{r.requestId}) — {r.discrepancy}</span>}
-                            {r && !r.ok && <span style={styles.badge.error} title={r.error}>{r.skipped ? "Omitida" : r.error}</span>}
+                            {r && !r.ok && (
+                              <span style={isAuthErr ? styles.badge.auth : styles.badge.error} title={r.error}>
+                                {r.skipped ? "Omitida" : isAuthErr ? "🔐 " + r.error : r.error}
+                              </span>
+                            )}
                           </td>
                         </tr>
                       );
@@ -801,6 +976,14 @@ const styles = {
       fontSize: 12,
       fontWeight: 500,
     },
+    auth: {
+      backgroundColor: "#fef3c7",
+      color: "#92400e",
+      padding: "2px 8px",
+      borderRadius: 4,
+      fontSize: 12,
+      fontWeight: 500,
+    },
   },
   blockerNote: {
     marginTop: 16,
@@ -833,6 +1016,16 @@ const styles = {
     fontWeight: 500,
     cursor: "pointer",
   },
+  btnWarning: {
+    backgroundColor: "#f59e0b",
+    color: "#fff",
+    border: "none",
+    borderRadius: 6,
+    padding: "8px 16px",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
   btnSmall: {
     background: "#f8fafc",
     border: "1px solid #e2e8f0",
@@ -846,4 +1039,72 @@ const styles = {
   summaryOk: { color: "#166534", fontWeight: 600, fontSize: 14 },
   summaryError: { color: "#991b1b", fontWeight: 600, fontSize: 14 },
   summarySkip: { color: "#92400e", fontWeight: 600, fontSize: 14 },
+  
+  // Modal styles
+  modalOverlay: {
+    position: "fixed",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 1000,
+  },
+  modal: {
+    backgroundColor: "#fff",
+    borderRadius: 12,
+    padding: 24,
+    maxWidth: 400,
+    width: "90%",
+    boxShadow: "0 20px 25px -5px rgba(0,0,0,0.1)",
+  },
+  modalTitle: { fontSize: 18, fontWeight: 600, color: "#0f172a", margin: "0 0 12px" },
+  modalText: { fontSize: 14, color: "#64748b", margin: "0 0 16px", lineHeight: 1.5 },
+  modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 },
+  formGroup: { marginBottom: 12 },
+  formLabel: { display: "block", fontSize: 13, fontWeight: 500, color: "#334155", marginBottom: 4 },
+  input: { width: "100%", padding: "8px 10px", border: "1px solid #cbd5e1", borderRadius: 6, fontSize: 14, backgroundColor: "#fff", boxSizing: "border-box" },
+  formError: { color: "#dc2626", fontSize: 13, margin: "0 0 10px" },
+  
+  // Token status badges
+  tokenBadgeExpired: {
+    backgroundColor: "#fef2f2",
+    color: "#991b1b",
+    padding: "4px 10px",
+    borderRadius: 6,
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: "pointer",
+  },
+  tokenBadgeExpiring: {
+    backgroundColor: "#fffbeb",
+    color: "#92400e",
+    padding: "4px 10px",
+    borderRadius: 6,
+    fontSize: 12,
+    fontWeight: 500,
+    cursor: "pointer",
+  },
+  tokenAlert: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "#fef2f2",
+    border: "1px solid #fecaca",
+    borderRadius: 8,
+    padding: 16,
+    marginBottom: 16,
+  },
+  authWarning: {
+    backgroundColor: "#fef3c7",
+    border: "1px solid #fcd34d",
+    borderRadius: 6,
+    padding: 12,
+    marginBottom: 16,
+    fontSize: 13,
+    color: "#92400e",
+  },
 };

@@ -1,62 +1,7 @@
-import { put, list, head } from "@vercel/blob";
+import { put } from "@vercel/blob";
+import { readBlobClients, writeBlobClients, getEnvClients, getClientConfig } from "./lib/auth";
 
-const BLOB_KEY = "config/clients.json";
-
-async function readBlobClients() {
-  try {
-    const { blobs } = await list({ prefix: BLOB_KEY });
-    if (blobs.length === 0) return [];
-    const resp = await fetch(blobs[0].url);
-    return await resp.json();
-  } catch {
-    return [];
-  }
-}
-
-async function writeBlobClients(clients) {
-  await put(BLOB_KEY, JSON.stringify(clients), {
-    access: "public",
-    contentType: "application/json",
-    addRandomSuffix: false,
-    allowOverwrite: true,
-  });
-}
-
-function getEnvClients() {
-  const clients = [];
-  const seen = new Set();
-  for (const key of Object.keys(process.env)) {
-    const match = key.match(/^CLIENT_(.+?)_(API_KEY|JWT_TOKEN|NAME)$/);
-    if (match && !seen.has(match[1])) {
-      seen.add(match[1]);
-      const slug = match[1];
-      const name = process.env[`CLIENT_${slug}_NAME`];
-      const hasApiKey = !!process.env[`CLIENT_${slug}_API_KEY`];
-      if (name && hasApiKey) {
-        clients.push({
-          slug: slug.toLowerCase(),
-          name,
-          apiKey: process.env[`CLIENT_${slug}_API_KEY`],
-          jwtToken: process.env[`CLIENT_${slug}_JWT_TOKEN`] || "",
-          source: "env",
-        });
-      }
-    }
-  }
-  return clients;
-}
-
-export async function getClientConfig(clientSlug) {
-  // 1. Try env vars
-  const envClients = getEnvClients();
-  const envMatch = envClients.find((c) => c.slug === clientSlug.toLowerCase());
-  if (envMatch) return envMatch;
-
-  // 2. Try Blob
-  const blobClients = await readBlobClients();
-  const blobMatch = blobClients.find((c) => c.slug === clientSlug.toLowerCase());
-  return blobMatch || null;
-}
+export { getClientConfig };
 
 export default async function handler(req, res) {
   if (req.method === "GET") {
@@ -87,7 +32,15 @@ export default async function handler(req, res) {
     const envClients = getEnvClients();
     if (envClients.some((c) => c.slug === slug)) return res.status(409).json({ error: "Ya existe una comunidad con ese slug" });
 
-    existing.push({ slug, name, apiKey, jwtToken: jwtToken || "", createdBy: createdBy || "", createdAt: new Date().toISOString() });
+    existing.push({ 
+      slug, 
+      name, 
+      apiKey, 
+      jwtToken: jwtToken || "", 
+      createdBy: createdBy || "", 
+      createdAt: new Date().toISOString(),
+      jwtRefreshedAt: jwtToken ? new Date().toISOString() : null,
+    });
     await writeBlobClients(existing);
     return res.status(201).json({ success: true });
   }
