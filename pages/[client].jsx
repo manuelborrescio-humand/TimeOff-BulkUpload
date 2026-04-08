@@ -236,6 +236,37 @@ export default function ClientPage() {
     setExporting(true);
     const allSuccessRows = [];
 
+    // Función para formatear fecha a dd/mm/yyyy
+    const formatDate = (val) => {
+      if (!val) return "";
+      let d;
+      if (val instanceof Date) {
+        d = val;
+      } else if (typeof val === "number") {
+        // Excel serial date
+        d = new Date((val - 25569) * 86400 * 1000);
+      } else {
+        const s = String(val).trim();
+        // Intentar parsear yyyy-mm-dd
+        const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+        if (isoMatch) {
+          return `${isoMatch[3].padStart(2, "0")}/${isoMatch[2].padStart(2, "0")}/${isoMatch[1]}`;
+        }
+        // Intentar parsear mm/dd/yy o m/d/yy
+        const usMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+        if (usMatch) {
+          const year = usMatch[3].length === 2 ? "20" + usMatch[3] : usMatch[3];
+          return `${usMatch[2].padStart(2, "0")}/${usMatch[1].padStart(2, "0")}/${year}`;
+        }
+        return s;
+      }
+      if (isNaN(d.getTime())) return String(val);
+      const day = String(d.getDate()).padStart(2, "0");
+      const month = String(d.getMonth() + 1).padStart(2, "0");
+      const year = d.getFullYear();
+      return `${day}/${month}/${year}`;
+    };
+
     try {
       for (const entry of entriesWithBlob) {
         try {
@@ -244,9 +275,9 @@ export default function ClientPage() {
           
           const arrayBuffer = await response.arrayBuffer();
           const data = new Uint8Array(arrayBuffer);
-          const workbook = XLSX.read(data, { type: "array" });
+          const workbook = XLSX.read(data, { type: "array", cellDates: true });
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
-          const rows = XLSX.utils.sheet_to_json(sheet, { defval: "" });
+          const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
           
           // Filtrar solo las filas exitosas (resultado empieza con "OK")
           const successRows = rows.filter((row) => {
@@ -266,13 +297,19 @@ export default function ClientPage() {
                 hour: "2-digit", minute: "2-digit" 
               }),
               "Archivo Origen": entry.fileName,
-              "Usuario": row["Usuario Resuelto"] || row.Usuario || "",
+              "Usuario Excel": row.Usuario || "",
+              "Usuario Resuelto": row["Usuario Resuelto"] || "",
               "Email": row["Email Resuelto"] || "",
-              "Política": row["Política Resuelta"] || row.Politicas || "",
-              "Fecha Inicio": row["Día de Inicio"] || row["Fecha Inicio"] || "",
-              "Fecha Fin": row["Día de fin"] || row["Fecha Fin"] || "",
-              "Días": row["Días Humand"] || row["Días Esperados"] || "",
+              "Match": row.Match || "",
+              "Política Excel": row.Politicas || "",
+              "Política Resuelta": row["Politica Resuelta"] || row["Política Resuelta"] || "",
+              "Fecha Inicio": formatDate(row["Día de Inicio"] || row["Fecha Inicio"] || ""),
+              "Fecha Fin": formatDate(row["Día de fin"] || row["Fecha Fin"] || ""),
+              "Días Solicitados": row["Cant de días habiles solicitados"] || row["Cant de dias habiles solicitados"] || "",
+              "Días Esperados": row["Dias Esperados"] || row["Días Esperados"] || "",
+              "Días Humand": row["Dias Humand"] || row["Días Humand"] || "",
               "Conteo": row.Conteo || "",
+              "Discrepancia": row.Discrepancia || "",
               "Request ID": requestId,
             });
           }
@@ -287,11 +324,11 @@ export default function ClientPage() {
         return;
       }
 
-      // Ordenar por fecha de carga (más reciente primero)
+      // Ordenar por Request ID (más reciente primero)
       allSuccessRows.sort((a, b) => {
-        const dateA = new Date(a["Fecha de Carga"].split(",")[0].split("/").reverse().join("-"));
-        const dateB = new Date(b["Fecha de Carga"].split(",")[0].split("/").reverse().join("-"));
-        return dateB - dateA;
+        const idA = parseInt(a["Request ID"]) || 0;
+        const idB = parseInt(b["Request ID"]) || 0;
+        return idB - idA;
       });
 
       // Crear el Excel consolidado
@@ -299,15 +336,21 @@ export default function ClientPage() {
       
       // Ajustar anchos de columna
       ws["!cols"] = [
-        { wch: 20 }, // Fecha de Carga
-        { wch: 35 }, // Archivo Origen
-        { wch: 25 }, // Usuario
-        { wch: 30 }, // Email
-        { wch: 20 }, // Política
+        { wch: 18 }, // Fecha de Carga
+        { wch: 40 }, // Archivo Origen
+        { wch: 28 }, // Usuario Excel
+        { wch: 28 }, // Usuario Resuelto
+        { wch: 32 }, // Email
+        { wch: 10 }, // Match
+        { wch: 15 }, // Política Excel
+        { wch: 22 }, // Política Resuelta
         { wch: 12 }, // Fecha Inicio
         { wch: 12 }, // Fecha Fin
-        { wch: 6 },  // Días
+        { wch: 10 }, // Días Solicitados
+        { wch: 10 }, // Días Esperados
+        { wch: 10 }, // Días Humand
         { wch: 10 }, // Conteo
+        { wch: 35 }, // Discrepancia
         { wch: 12 }, // Request ID
       ];
       
