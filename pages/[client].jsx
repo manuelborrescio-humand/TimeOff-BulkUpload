@@ -157,6 +157,11 @@ export default function ClientPage() {
   // Estado para exportación consolidada
   const [exporting, setExporting] = useState(false);
   
+  // Estado para verificación de pendientes
+  const [showVerifyModal, setShowVerifyModal] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const verifyFileRef = useRef(null);
+  
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -365,6 +370,204 @@ export default function ClientPage() {
     }
     
     setExporting(false);
+  };
+
+  // Función para normalizar fechas a formato comparable yyyy-mm-dd
+  const normalizeDateForCompare = (val) => {
+    if (!val) return "";
+    if (val instanceof Date) {
+      const y = val.getFullYear();
+      const m = String(val.getMonth() + 1).padStart(2, "0");
+      const d = String(val.getDate()).padStart(2, "0");
+      return `${y}-${m}-${d}`;
+    }
+    const s = String(val).trim();
+    // yyyy-mm-dd
+    const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (isoMatch) return `${isoMatch[1]}-${isoMatch[2].padStart(2, "0")}-${isoMatch[3].padStart(2, "0")}`;
+    // dd/mm/yyyy
+    const dmyMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (dmyMatch) return `${dmyMatch[3]}-${dmyMatch[2].padStart(2, "0")}-${dmyMatch[1].padStart(2, "0")}`;
+    // m/d/yy o mm/dd/yy (formato US)
+    const usMatch = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2})$/);
+    if (usMatch) {
+      const year = "20" + usMatch[3];
+      return `${year}-${usMatch[1].padStart(2, "0")}-${usMatch[2].padStart(2, "0")}`;
+    }
+    // m/d/yyyy (formato US)
+    const usMatch2 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (usMatch2) {
+      return `${usMatch2[3]}-${usMatch2[1].padStart(2, "0")}-${usMatch2[2].padStart(2, "0")}`;
+    }
+    return s;
+  };
+
+  // Crear clave única para comparar filas
+  const createRowKey = (email, policy, fromDate, toDate) => {
+    const e = normalizeStr(email).split("@")[0]; // solo la parte antes del @
+    const p = normalizeStr(policy);
+    const f = normalizeDateForCompare(fromDate);
+    const t = normalizeDateForCompare(toDate);
+    return `${e}|${p}|${f}|${t}`;
+  };
+
+  const verifyPendientes = async (file) => {
+    if (!file) return;
+    setVerifying(true);
+    
+    try {
+      // 1. Leer el archivo original
+      const reader = new FileReader();
+      const originalRows = await new Promise((resolve, reject) => {
+        reader.onload = (e) => {
+          try {
+            const data = new Uint8Array(e.target.result);
+            const workbook = XLSX.read(data, { type: "array", cellDates: true });
+            const sheet = workbook.Sheets[workbook.SheetNames[0]];
+            const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+            resolve(rows);
+          } catch (err) {
+            reject(err);
+          }
+        };
+        reader.onerror = reject;
+        reader.readAsArrayBuffer(file);
+      });
+
+      // 2. Obtener todas las filas exitosas del historial
+      const entriesWithBlob = history.filter((e) => e.blobUrl && e.successCount > 0);
+      const successfulKeys = new Set();
+      const successfulRows = [];
+
+      for (const entry of entriesWithBlob) {
+        try {
+          const response = await fetch(entry.blobUrl);
+          if (!response.ok) continue;
+          
+          const arrayBuffer = await response.arrayBuffer();
+          const data = new Uint8Array(arrayBuffer);
+          const workbook = XLSX.read(data, { type: "array", cellDates: true });
+          const sheet = workbook.Sheets[workbook.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
+          
+          for (const row of rows) {
+            const resultado = (row.Resultado || "").toString();
+            if (resultado.startsWith("OK")) {
+              const email = row["Email Resuelto"] || row.Usuario || "";
+              const policy = row["Politica Resuelta"] || row["Política Resuelta"] || row.Politicas || "";
+              const fromDate = row["Día de Inicio"] || row["Fecha Inicio"] || "";
+              const toDate = row["Día de fin"] || row["Fecha Fin"] || "";
+              const key = createRowKey(email, policy, fromDate, toDate);
+              successfulKeys.add(key);
+              
+              // Extraer Request ID
+              const match = resultado.match(/OK \(#(\d+)\)/);
+              successfulRows.push({
+                ...row,
+                _key: key,
+                _requestId: match ? match[1] : "",
+                _cargaTimestamp: entry.timestamp,
+                _cargaArchivo: entry.fileName,
+              });
+            }
+          }
+        } catch (err) {
+          console.error(`Error procesando ${entry.fileName}:`, err);
+        }
+      }
+
+      // 3. Detectar columnas del archivo original
+      const headers = Object.keys(originalRows[0] || {});
+      const emailCol = headers.find(h => /usuario|email|correo|mail/i.test(h)) || headers[0];
+      const policyCol = headers.find(h => /poli[ct]i[ck]a|tipo|licencia/i.test(h)) || headers[1];
+      const fromCol = headers.find(h => /inicio|desde|from/i.test(h)) || headers[2];
+      const toCol = headers.find(h => /fin|hasta|to\b|end/i.test(h)) || headers[3];
+
+      // 4. Clasificar filas del archivo original
+      const pendientes = [];
+      const cargadas = [];
+
+      for (const row of originalRows) {
+        const email = row[emailCol] || "";
+        const policy = row[policyCol] || "";
+        const fromDate = row[fromCol] || "";
+        const toDate = row[toCol] || "";
+        const key = createRowKey(email, policy, fromDate, toDate);
+
+        if (successfulKeys.has(key)) {
+          // Buscar el registro exitoso correspondiente
+          const successRow = successfulRows.find(r => r._key === key);
+          cargadas.push({
+            "Usuario": email,
+            "Política": policy,
+            "Fecha Inicio": fromDate,
+            "Fecha Fin": toDate,
+            ...Object.fromEntries(
+              Object.entries(row).filter(([k]) => ![emailCol, policyCol, fromCol, toCol].includes(k))
+            ),
+            "Estado": "✓ CARGADA",
+            "Request ID": successRow?._requestId || "",
+            "Fecha de Carga": successRow?._cargaTimestamp ? new Date(successRow._cargaTimestamp).toLocaleString("es-AR") : "",
+          });
+        } else {
+          pendientes.push({
+            "Usuario": email,
+            "Política": policy,
+            "Fecha Inicio": fromDate,
+            "Fecha Fin": toDate,
+            ...Object.fromEntries(
+              Object.entries(row).filter(([k]) => ![emailCol, policyCol, fromCol, toCol].includes(k))
+            ),
+            "Estado": "⚠ PENDIENTE",
+          });
+        }
+      }
+
+      // 5. Generar Excel con 2 hojas
+      const wb = XLSX.utils.book_new();
+      
+      // Hoja de resumen
+      const resumenData = [
+        { "Métrica": "Total en archivo original", "Cantidad": originalRows.length },
+        { "Métrica": "Cargadas exitosamente", "Cantidad": cargadas.length },
+        { "Métrica": "Pendientes de cargar", "Cantidad": pendientes.length },
+        { "Métrica": "Porcentaje completado", "Cantidad": `${Math.round((cargadas.length / originalRows.length) * 100)}%` },
+      ];
+      const wsResumen = XLSX.utils.json_to_sheet(resumenData);
+      wsResumen["!cols"] = [{ wch: 25 }, { wch: 15 }];
+      XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen");
+
+      // Hoja de cargadas
+      if (cargadas.length > 0) {
+        const wsCargadas = XLSX.utils.json_to_sheet(cargadas);
+        wsCargadas["!cols"] = [
+          { wch: 30 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
+          { wch: 12 }, { wch: 12 }, { wch: 20 },
+        ];
+        XLSX.utils.book_append_sheet(wb, wsCargadas, "Cargadas OK");
+      }
+
+      // Hoja de pendientes
+      if (pendientes.length > 0) {
+        const wsPendientes = XLSX.utils.json_to_sheet(pendientes);
+        wsPendientes["!cols"] = [
+          { wch: 30 }, { wch: 20 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
+          { wch: 15 },
+        ];
+        XLSX.utils.book_append_sheet(wb, wsPendientes, "Pendientes");
+      }
+
+      const fileName = `verificacion-${clientSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`;
+      XLSX.writeFile(wb, fileName);
+
+      setShowVerifyModal(false);
+      alert(`✅ Verificación completada:\n\n• ${cargadas.length} cargadas OK\n• ${pendientes.length} pendientes\n\nSe descargó el archivo "${fileName}"`);
+      
+    } catch (err) {
+      alert("Error al verificar: " + err.message);
+    }
+    
+    setVerifying(false);
   };
 
   const handleFile = useCallback(
@@ -663,6 +866,48 @@ export default function ClientPage() {
           </div>
         </div>
       )}
+
+      {/* Modal de verificación de pendientes */}
+      {showVerifyModal && (
+        <div style={styles.modalOverlay}>
+          <div style={styles.modal}>
+            <h3 style={styles.modalTitle}>🔍 Verificar pendientes</h3>
+            <p style={styles.modalText}>
+              Sube el archivo original con todas las ausencias que debían cargarse. 
+              Se comparará contra las cargas exitosas del historial y generará un reporte con:
+            </p>
+            <ul style={{ fontSize: 13, color: "#64748b", margin: "0 0 16px", paddingLeft: 20 }}>
+              <li>Resumen de completitud</li>
+              <li>Listado de ausencias ya cargadas (con Request ID)</li>
+              <li>Listado de ausencias pendientes</li>
+            </ul>
+            <input
+              ref={verifyFileRef}
+              type="file"
+              accept=".xlsx,.xls,.csv"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files[0]) verifyPendientes(e.target.files[0]);
+              }}
+            />
+            <div style={styles.modalActions}>
+              <button 
+                style={styles.btnSecondary} 
+                onClick={() => setShowVerifyModal(false)}
+              >
+                Cancelar
+              </button>
+              <button 
+                style={{ ...styles.btnPrimary, opacity: verifying ? 0.6 : 1 }} 
+                onClick={() => verifyFileRef.current?.click()}
+                disabled={verifying}
+              >
+                {verifying ? "Verificando..." : "Seleccionar archivo"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       <div style={styles.container}>
         <div style={styles.content}>
@@ -821,19 +1066,27 @@ export default function ClientPage() {
                       </tbody>
                     </table>
                   </div>
-                  {/* Resumen y botón de exportar */}
+                  {/* Resumen y botones de exportar */}
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 16, paddingTop: 16, borderTop: "1px solid #e2e8f0" }}>
                     <div style={{ fontSize: 13, color: "#64748b" }}>
                       Total: <strong style={{ color: "#166534" }}>{history.reduce((sum, e) => sum + (e.successCount || 0), 0)}</strong> exitosas, {" "}
                       <strong style={{ color: "#991b1b" }}>{history.reduce((sum, e) => sum + (e.errorCount || 0), 0)}</strong> errores
                     </div>
-                    <button 
-                      style={{ ...styles.btnSecondary, opacity: exporting ? 0.6 : 1 }} 
-                      onClick={exportConsolidated}
-                      disabled={exporting}
-                    >
-                      {exporting ? "Exportando..." : "📥 Exportar todo (.xlsx)"}
-                    </button>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button 
+                        style={styles.btnSecondary}
+                        onClick={() => setShowVerifyModal(true)}
+                      >
+                        🔍 Verificar pendientes
+                      </button>
+                      <button 
+                        style={{ ...styles.btnSecondary, opacity: exporting ? 0.6 : 1 }} 
+                        onClick={exportConsolidated}
+                        disabled={exporting}
+                      >
+                        {exporting ? "Exportando..." : "📥 Exportar exitosas"}
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
