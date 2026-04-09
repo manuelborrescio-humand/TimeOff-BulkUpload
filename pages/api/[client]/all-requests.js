@@ -1,21 +1,10 @@
-import { callWithRetry } from "../lib/auth";
+import { getClientConfig } from "../lib/auth";
+
+const REDASH_URL = process.env.REDASH_URL || "https://redash.humand.co";
+const REDASH_API_KEY = process.env.REDASH_API_KEY;
+const REDASH_QUERY_ID = process.env.REDASH_VACATION_QUERY_ID || "5050";
 
 const API_BASE = "https://api-prod.humand.co";
-const PAGE_SIZE = 100;
-
-/**
- * Decodes a JWT payload without verifying signature.
- * Returns the payload object or null.
- */
-function decodeJwtPayload(token) {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) return null;
-    return JSON.parse(Buffer.from(parts[1], "base64url").toString());
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Fetches instanceId from the balances endpoint if not cached in config.
@@ -36,91 +25,62 @@ async function fetchInstanceId(config) {
   }
 }
 
+/**
+ * Maps a Redash row (query 5050) to the normalized format expected by the frontend.
+ * Columns confirmed: requestId, user_id, user, policy_type_id, policy_type_name,
+ *                   from_date, to_date, status, days_asked, policy_id, policy_name,
+ *                   user_employee_internal_id
+ */
+function mapRedashRow(row) {
+  return {
+    id: row.requestId,
+    issuerId: row.user_id,
+    userId: row.user_id,
+    userName: row.user,
+    policyTypeId: row.policy_type_id,
+    policy: row.policy_type_name,
+    fromDate: row.from_date,
+    toDate: row.to_date,
+    state: row.status,
+    amount: row.days_asked,
+  };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   const clientSlug = req.query.client;
 
-  const result = await callWithRetry(clientSlug, async (config) => {
-    // Resolve instanceId: from config cache or from balances endpoint
-    const instanceId = config.instanceId || await fetchInstanceId(config);
+  const config = await getClientConfig(clientSlug);
+  if (!config) return res.status(404).json({ error: "Cliente no encontrado" });
 
-    // Extract role from JWT payload (Humand requires it as a query param)
-    const jwtPayload = decodeJwtPayload(config.jwtToken);
-    const role = jwtPayload?.role || jwtPayload?.roles?.[0] || "ADMIN";
-
-    const allItems = [];
-    let page = 0;
-    let hasMore = true;
-
-    while (hasMore) {
-      const paramObj = {
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
-        role,
-      };
-
-      // Include instanceId if we have it
-      if (instanceId) paramObj.instanceId = instanceId;
-
-      const params = new URLSearchParams(paramObj);
-
-      const resp = await fetch(`${API_BASE}/api/v1/vacations/requests?${params}`, {
-        headers: {
-          Authorization: `Bearer ${config.jwtToken}`,
-          "Content-Type": "application/json",
-          Origin: "https://app.humand.co",
-          "x-humand-origin": "web",
-        },
-      });
-
-      if (!resp.ok) {
-        const data = await resp.json().catch(() => ({}));
-        const humandMsg = data.message || data.code || data.error || JSON.stringify(data);
-
-        if (resp.status === 401 || resp.status === 403) {
-          return { tokenExpired: true, status: resp.status, data };
-        }
-        return {
-          ok: false,
-          status: resp.status,
-          error: `Error ${resp.status} de Humand: ${humandMsg}`,
-          humandError: data,
-          debugInfo: { instanceIdUsed: instanceId || "(ninguno)", roleUsed: role },
-        };
-      }
-
-      const data = await resp.json();
-      const items = Array.isArray(data) ? data : (data.items || data.content || data.data || []);
-      const total = data.total ?? data.totalElements ?? null;
-
-      allItems.push(...items);
-
-      // Stop if: fewer items than pageSize, or reached total, or direct array (no pagination)
-      if (
-        items.length < PAGE_SIZE ||
-        (total !== null && allItems.length >= total) ||
-        Array.isArray(data)
-      ) {
-        hasMore = false;
-      } else {
-        page++;
-      }
-
-      // Safety cap: max 20 pages (2000 requests)
-      if (page >= 20) hasMore = false;
-    }
-
-    return { ok: true, items: allItems, total: allItems.length };
-  });
-
-  if (result.error) {
-    return res.status(result.status || 502).json({
-      error: result.error,
-      humandError: result.humandError,
-      debugInfo: result.debugInfo,
-    });
+  // Resolve instanceId from config cache or balances endpoint
+  const instanceId = config.instanceId || await fetchInstanceId(config);
+  if (!instanceId) {
+    return res.status(400).json({ error: "No se pudo obtener instanceId del cliente" });
   }
 
-  res.status(200).json({ items: result.items, total: result.total });
+  if (!REDASH_API_KEY) {
+    return res.status(500).json({ error: "REDASH_API_KEY no configurada en variables de entorno" });
+  }
+
+  const url = `${REDASH_URL}/api/queries/${REDASH_QUERY_ID}/results.json?api_key=${REDASH_API_KEY}&p_instanceId=${instanceId}`;
+
+  let resp;
+  try {
+    resp = await fetch(url);
+  } catch (err) {
+    return res.status(502).json({ error: `Error de conexión con Redash: ${err.message}` });
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    return res.status(resp.status).json({ error: `Error Redash ${resp.status}: ${body}` });
+  }
+
+  const data = await resp.json();
+  const rows = data?.query_result?.data?.rows || [];
+  const items = rows.map(mapRedashRow);
+
+  res.status(200).json({ items, total: items.length });
 }
