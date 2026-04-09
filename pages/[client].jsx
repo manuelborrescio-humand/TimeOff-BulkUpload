@@ -1067,30 +1067,78 @@ export default function ClientPage() {
                   ) : (
                     <span style={{ color: "#166534", fontWeight: 600 }}>✅ Sin duplicados</span>
                   )}
-                  <button
-                    style={{ ...styles.btnSmall, marginLeft: "auto" }}
-                    onClick={() => {
-                      const rows = requestsData.items.map((r) => ({
-                        "Request ID": r.id,
-                        "Usuario": r.userName,
-                        "Email": r.userEmail,
-                        "Política": r.policy,
-                        "Desde": r.fromDate,
-                        "Hasta": r.toDate,
-                        "Días": r.amount,
-                        "Estado": r.state,
-                        "Creada": r.createdAt ? new Date(r.createdAt).toLocaleString("es-AR") : "",
-                        "Duplicado": r.isDuplicate ? `Sí (IDs: ${r.dupIds.join(", ")})` : "No",
-                      }));
-                      const ws = XLSX.utils.json_to_sheet(rows);
-                      ws["!cols"] = [{ wch: 12 }, { wch: 22 }, { wch: 30 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 20 }, { wch: 35 }];
-                      const wb = XLSX.utils.book_new();
-                      XLSX.utils.book_append_sheet(wb, ws, "Solicitudes");
-                      XLSX.writeFile(wb, `solicitudes-${clientSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`);
-                    }}
-                  >
-                    📥 Exportar Excel
-                  </button>
+                  <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                    {requestsData.dupCount > 0 && (
+                      <button
+                        style={{ ...styles.btnSmall, backgroundColor: "#fef2f2", color: "#991b1b", fontWeight: 600 }}
+                        onClick={() => {
+                          // Agrupar duplicados: para cada key, conservar el más antiguo (menor ID)
+                          // y marcar el resto para eliminar
+                          const groups = {};
+                          requestsData.items.forEach((r) => {
+                            const key = `${r.userId}|${r.policyTypeId}|${r.fromDate}|${r.toDate}`;
+                            if (!groups[key]) groups[key] = [];
+                            groups[key].push(r);
+                          });
+
+                          const toDelete = [];
+                          Object.values(groups).forEach((group) => {
+                            if (group.length <= 1) return;
+                            // Ordenar por ID ascendente → el menor es el original
+                            const sorted = [...group].sort((a, b) => Number(a.id) - Number(b.id));
+                            // Los demás (índice 1+) son duplicados a eliminar
+                            sorted.slice(1).forEach((r) => toDelete.push(r.id));
+                          });
+
+                          // Generar CSV: columna requestId
+                          const csv = "requestId\n" + toDelete.join("\n");
+                          const blob = new Blob([csv], { type: "text/csv" });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = url;
+                          a.download = `duplicados-para-eliminar-${clientSlug}-${new Date().toISOString().slice(0, 10)}.csv`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                        }}
+                      >
+                        🗑️ Exportar CSV para eliminar ({
+                          (() => {
+                            const groups = {};
+                            requestsData.items.forEach((r) => {
+                              const key = `${r.userId}|${r.policyTypeId}|${r.fromDate}|${r.toDate}`;
+                              if (!groups[key]) groups[key] = [];
+                              groups[key].push(r);
+                            });
+                            return Object.values(groups).filter(g => g.length > 1).reduce((sum, g) => sum + g.length - 1, 0);
+                          })()
+                        } IDs)
+                      </button>
+                    )}
+                    <button
+                      style={styles.btnSmall}
+                      onClick={() => {
+                        const rows = requestsData.items.map((r) => ({
+                          "Request ID": r.id,
+                          "Usuario": r.userName,
+                          "Email": r.userEmail,
+                          "Política": r.policy,
+                          "Desde": r.fromDate,
+                          "Hasta": r.toDate,
+                          "Días": r.amount,
+                          "Estado": r.state,
+                          "Creada": r.createdAt ? new Date(r.createdAt).toLocaleString("es-AR") : "",
+                          "Duplicado": r.isDuplicate ? `Sí (IDs: ${r.dupIds.join(", ")})` : "No",
+                        }));
+                        const ws = XLSX.utils.json_to_sheet(rows);
+                        ws["!cols"] = [{ wch: 12 }, { wch: 22 }, { wch: 30 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 20 }, { wch: 35 }];
+                        const wb = XLSX.utils.book_new();
+                        XLSX.utils.book_append_sheet(wb, ws, "Solicitudes");
+                        XLSX.writeFile(wb, `solicitudes-${clientSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+                      }}
+                    >
+                      📥 Exportar Excel
+                    </button>
+                  </div>
                 </div>
 
                 <div style={{ overflowY: "auto", flex: 1, borderRadius: 6, border: "1px solid #e2e8f0" }}>
