@@ -82,5 +82,5 @@ export default async function handler(req, res) {
   const rows = data?.query_result?.data?.rows || [];
   const items = rows.map(mapRedashRow);
 
-  res.status(200).json({ items, total: items.length });
+  res.status(200).json({ items, total: items.length, _debug: { instanceId, rowsFromRedash: rows.length } });
 }
