@@ -4,49 +4,38 @@ const REDASH_URL = process.env.REDASH_URL || "https://redash.humand.co";
 const REDASH_API_KEY = process.env.REDASH_API_KEY;
 const REDASH_QUERY_ID = process.env.REDASH_VACATION_QUERY_ID || "5050";
 
-const API_BASE = "https://api-prod.humand.co";
+const HUMAND_API_BASE = "https://api-prod.humand.co";
 
 /**
  * Fetches instanceId from Humand API using the client's API key.
- * Returns { instanceId, source, raw } for debugging.
  */
 async function fetchInstanceId(config) {
-  const headers = {
-    Authorization: `Basic ${config.apiKey}`,
-    "Content-Type": "application/json",
-  };
+  const headers = { Authorization: `Basic ${config.apiKey}`, "Content-Type": "application/json" };
 
-  // Intento 1: /public/api/v1/users/me → puede tener instanceId directo
+  // Intento 1: users/me
   try {
-    const resp = await fetch(`${API_BASE}/public/api/v1/users/me`, { headers });
+    const resp = await fetch(`${HUMAND_API_BASE}/public/api/v1/users/me`, { headers });
     if (resp.ok) {
       const data = await resp.json();
-      if (data.instanceId) return { instanceId: data.instanceId, source: "users/me", raw: data };
+      if (data.instanceId) return data.instanceId;
     }
   } catch {}
 
-  // Intento 2: /public/api/v1/time-off/balances → items[0].user.instanceId
+  // Intento 2: balances
   try {
-    const resp = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, { headers });
+    const resp = await fetch(`${HUMAND_API_BASE}/public/api/v1/time-off/balances?limit=1`, { headers });
     if (resp.ok) {
       const data = await resp.json();
       const id = data.items?.[0]?.user?.instanceId;
-      if (id) return { instanceId: id, source: "balances.user.instanceId", raw: data.items?.[0]?.user };
-      // Devolver info de debug aunque no haya instanceId
-      return { instanceId: null, source: "balances (sin instanceId)", raw: data };
+      if (id) return id;
     }
-  } catch (e) {
-    return { instanceId: null, source: "balances (error)", raw: e.message };
-  }
+  } catch {}
 
-  return { instanceId: null, source: "no endpoint funcionó", raw: null };
+  return null;
 }
 
 /**
  * Maps a Redash row (query 5050) to the normalized format expected by the frontend.
- * Columns confirmed: requestId, user_id, user, policy_type_id, policy_type_name,
- *                   from_date, to_date, status, days_asked, policy_id, policy_name,
- *                   user_employee_internal_id
  */
 function mapRedashRow(row) {
   return {
@@ -63,6 +52,67 @@ function mapRedashRow(row) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Fetches fresh results from Redash using POST with max_age:0 + polling.
+ * Returns rows array or throws.
+ */
+async function fetchRedashFresh(instanceId) {
+  const authHeader = { Authorization: `Key ${REDASH_API_KEY}`, "Content-Type": "application/json" };
+
+  // POST to trigger fresh execution
+  const postResp = await fetch(`${REDASH_URL}/api/queries/${REDASH_QUERY_ID}/results`, {
+    method: "POST",
+    headers: authHeader,
+    body: JSON.stringify({ parameters: { instanceId }, max_age: 0 }),
+  });
+
+  if (!postResp.ok) {
+    const body = await postResp.text().catch(() => "");
+    throw new Error(`Redash POST ${postResp.status}: ${body}`);
+  }
+
+  const postData = await postResp.json();
+
+  // Result already available (cached hit with max_age match)
+  if (postData.query_result) {
+    return postData.query_result.data.rows || [];
+  }
+
+  // Job started — poll until done
+  if (postData.job) {
+    const jobId = postData.job.id;
+    for (let attempt = 0; attempt < 30; attempt++) {
+      await sleep(1000);
+
+      const jobResp = await fetch(`${REDASH_URL}/api/jobs/${jobId}`, { headers: authHeader });
+      if (!jobResp.ok) continue;
+
+      const jobData = await jobResp.json();
+      const status = jobData.job?.status;
+
+      if (status === 3) {
+        // Success — fetch result
+        const resultId = jobData.job.query_result_id;
+        const resultResp = await fetch(`${REDASH_URL}/api/query_results/${resultId}`, { headers: authHeader });
+        const resultData = await resultResp.json();
+        return resultData.query_result?.data?.rows || [];
+      }
+
+      if (status === 4) {
+        throw new Error("Redash query falló: " + (jobData.job?.error || "error desconocido"));
+      }
+      // status 1 = pending, 2 = running — seguir esperando
+    }
+    throw new Error("Redash query timeout (>30s)");
+  }
+
+  throw new Error("Respuesta inesperada de Redash: " + JSON.stringify(postData).slice(0, 200));
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
@@ -71,44 +121,23 @@ export default async function handler(req, res) {
   const config = await getClientConfig(clientSlug);
   if (!config) return res.status(404).json({ error: "Cliente no encontrado" });
 
-  // Resolve instanceId from config cache or Humand API
-  let instanceId = config.instanceId;
-  let fetchDebug = null;
-  if (!instanceId) {
-    const fetched = await fetchInstanceId(config);
-    instanceId = fetched.instanceId;
-    fetchDebug = { source: fetched.source, raw: fetched.raw };
-  }
-
-  if (!instanceId) {
-    return res.status(400).json({
-      error: "No se pudo obtener instanceId del cliente",
-      fetchDebug,
-      hint: "Revisá la respuesta de fetchDebug.raw para entender qué devuelve el API key de Humand",
-    });
-  }
-
   if (!REDASH_API_KEY) {
     return res.status(500).json({ error: "REDASH_API_KEY no configurada en variables de entorno" });
   }
 
-  const url = `${REDASH_URL}/api/queries/${REDASH_QUERY_ID}/results.json?api_key=${REDASH_API_KEY}&p_instanceId=${instanceId}`;
+  // Resolve instanceId from config or Humand API
+  const instanceId = config.instanceId || await fetchInstanceId(config);
+  if (!instanceId) {
+    return res.status(400).json({ error: "No se pudo obtener instanceId del cliente" });
+  }
 
-  let resp;
+  let rows;
   try {
-    resp = await fetch(url);
+    rows = await fetchRedashFresh(instanceId);
   } catch (err) {
-    return res.status(502).json({ error: `Error de conexión con Redash: ${err.message}` });
+    return res.status(502).json({ error: err.message });
   }
 
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    return res.status(resp.status).json({ error: `Error Redash ${resp.status}: ${body}` });
-  }
-
-  const data = await resp.json();
-  const rows = data?.query_result?.data?.rows || [];
   const items = rows.map(mapRedashRow);
-
-  res.status(200).json({ items, total: items.length, _debug: { instanceId, fetchDebug, rowsFromRedash: rows.length } });
+  res.status(200).json({ items, total: items.length });
 }
