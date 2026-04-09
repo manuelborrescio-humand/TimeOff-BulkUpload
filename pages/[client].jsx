@@ -289,16 +289,16 @@ export default function ClientPage() {
           const sheet = workbook.Sheets[workbook.SheetNames[0]];
           const rows = XLSX.utils.sheet_to_json(sheet, { defval: "", raw: false });
           
-          // Filtrar solo las filas exitosas (resultado empieza con "OK")
+          // Filtrar solo las filas exitosas (resultado empieza con "OK" o "Ya existía")
           const successRows = rows.filter((row) => {
             const resultado = (row.Resultado || "").toString();
-            return resultado.startsWith("OK");
+            return resultado.startsWith("OK") || resultado.startsWith("Ya existía");
           });
-          
+
           // Agregar metadata de la carga
           for (const row of successRows) {
-            // Extraer el Request ID del resultado "OK (#123456)"
-            const match = (row.Resultado || "").match(/OK \(#(\d+)\)/);
+            // Extraer el Request ID del resultado "OK (#123456)" o "Ya existía (#123456)"
+            const match = (row.Resultado || "").match(/\(#(\d+)\)/);
             const requestId = match ? match[1] : "";
             
             allSuccessRows.push({
@@ -780,6 +780,19 @@ export default function ClientPage() {
         consecutiveAuthErrors = 0; // Reset si create fue exitoso
         successfulRequests++;
 
+        // Si la request ya existía (solapamiento recuperado), no hay que aprobar
+        if (createData.alreadyExisted) {
+          newResults[i] = {
+            ok: true,
+            requestId: createData.id,
+            days: createData.amountRequested,
+            expectedDays: row.expectedDays,
+            alreadyExisted: true,
+          };
+          setResults({ ...newResults });
+          continue;
+        }
+
         let approveRes = await fetch(`/api/${clientSlug}/approve`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -845,7 +858,10 @@ export default function ClientPage() {
     try {
       const exportRows = validatedRows.map((row, i) => {
         const r = newResults[i];
-        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Política Resuelta": row.policyTypeName || "", "Días Esperados": row.expectedDays || "", "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Hábiles" : "Corridos", "Días Humand": r?.days || "", "Discrepancia": r?.discrepancy || "", Resultado: r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar" };
+        const resultado = r?.ok
+          ? (r.alreadyExisted ? `Ya existía (#${r.requestId})` : `OK (#${r.requestId})`)
+          : r?.error || "Sin procesar";
+        return { ...row.raw, "Usuario Resuelto": row.userName || "", "Email Resuelto": row.userEmail || "", "Match": row.matchMethod || "", "Política Resuelta": row.policyTypeName || "", "Días Esperados": row.expectedDays || "", "Conteo": row.countingMethod === "BUSINESS_DAYS" ? "Hábiles" : "Corridos", "Días Humand": r?.days || "", "Discrepancia": r?.discrepancy || "", Resultado: resultado };
       });
       const ws = XLSX.utils.json_to_sheet(exportRows);
       const wb = XLSX.utils.book_new();
@@ -864,7 +880,8 @@ export default function ClientPage() {
     } catch {}
   };
 
-  const successCount = Object.values(results).filter((r) => r.ok).length;
+  const successCount = Object.values(results).filter((r) => r.ok && !r.alreadyExisted).length;
+  const alreadyExistedCount = Object.values(results).filter((r) => r.ok && r.alreadyExisted).length;
   const errorCount = Object.values(results).filter((r) => !r.ok && !r.skipped).length;
   const skippedCount = Object.values(results).filter((r) => r.skipped).length;
   const validCount = validatedRows.filter((r) => r.valid).length;
@@ -872,7 +889,9 @@ export default function ClientPage() {
   const downloadResults = () => {
     const exportRows = validatedRows.map((row, i) => {
       const r = results[i];
-      const resultado = r?.ok ? `OK (#${r.requestId})` : r?.error || "Sin procesar";
+      const resultado = r?.ok
+        ? (r.alreadyExisted ? `Ya existía (#${r.requestId})` : `OK (#${r.requestId})`)
+        : r?.error || "Sin procesar";
       return {
         ...row.raw,
         "Usuario Resuelto": row.userName || "",
@@ -1331,6 +1350,7 @@ export default function ClientPage() {
               {step === "done" && (
                 <div style={styles.summary}>
                   {successCount > 0 && <span style={styles.summaryOk}>{successCount} creadas</span>}
+                  {alreadyExistedCount > 0 && <span style={styles.summaryExisted}>{alreadyExistedCount} ya existían</span>}
                   {errorCount > 0 && <span style={styles.summaryError}>{errorCount} con error</span>}
                   {skippedCount > 0 && <span style={styles.summarySkip}>{skippedCount} omitidas</span>}
                 </div>
@@ -1372,8 +1392,9 @@ export default function ClientPage() {
                           </td>
                           <td style={styles.td}>
                             {isProcessing && <span style={{ color: "#d97706" }}>...</span>}
-                            {r?.ok && !r.discrepancy && <span style={styles.badge.ok}>OK (#{r.requestId})</span>}
-                            {r?.ok && r.discrepancy && <span style={styles.badge.warning} title={r.discrepancy}>OK (#{r.requestId}) — {r.discrepancy}</span>}
+                            {r?.ok && r.alreadyExisted && <span style={styles.badge.existed}>Ya existía (#{r.requestId})</span>}
+                            {r?.ok && !r.alreadyExisted && !r.discrepancy && <span style={styles.badge.ok}>OK (#{r.requestId})</span>}
+                            {r?.ok && !r.alreadyExisted && r.discrepancy && <span style={styles.badge.warning} title={r.discrepancy}>OK (#{r.requestId}) — {r.discrepancy}</span>}
                             {r && !r.ok && (
                               <span style={isAuthErr ? styles.badge.auth : styles.badge.error} title={r.error}>
                                 {r.skipped ? "Omitida" : isAuthErr ? "🔐 " + r.error : r.error}
@@ -1483,6 +1504,14 @@ const styles = {
       fontSize: 12,
       fontWeight: 500,
     },
+    existed: {
+      backgroundColor: "#dbeafe",
+      color: "#1e40af",
+      padding: "2px 8px",
+      borderRadius: 4,
+      fontSize: 12,
+      fontWeight: 500,
+    },
   },
   blockerNote: {
     marginTop: 16,
@@ -1536,6 +1565,7 @@ const styles = {
   },
   summary: { display: "flex", gap: 12, marginBottom: 16 },
   summaryOk: { color: "#166534", fontWeight: 600, fontSize: 14 },
+  summaryExisted: { color: "#1e40af", fontWeight: 600, fontSize: 14 },
   summaryError: { color: "#991b1b", fontWeight: 600, fontSize: 14 },
   summarySkip: { color: "#92400e", fontWeight: 600, fontSize: 14 },
   

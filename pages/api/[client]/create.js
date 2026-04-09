@@ -16,6 +16,39 @@ function translateError(msg, policyTypeId, userId) {
   return msg;
 }
 
+/**
+ * Busca una request existente para el usuario y fechas dados.
+ * Se llama cuando create falla por solapamiento.
+ */
+async function findExistingRequest(config, issuerId, policyTypeId, fromDate, toDate) {
+  try {
+    const params = new URLSearchParams({ issuerId, limit: 100 });
+    const resp = await fetch(`${API_BASE}/vacations/requests?${params}`, {
+      headers: {
+        Authorization: `Bearer ${config.jwtToken}`,
+        "Content-Type": "application/json",
+        Origin: "https://app.humand.co",
+        "x-humand-origin": "web",
+      },
+    });
+    if (!resp.ok) return null;
+
+    const data = await resp.json();
+    const items = Array.isArray(data) ? data : (data.items || data.content || []);
+
+    const match = items.find((r) => {
+      const samePolicy = !policyTypeId || r.policyTypeId === policyTypeId || r.policyType?.id === policyTypeId;
+      const fromOk = r.from?.date === fromDate || r.fromDate === fromDate;
+      const toOk = r.to?.date === toDate || r.toDate === toDate;
+      return samePolicy && fromOk && toOk;
+    });
+
+    return match ? { id: match.id, state: match.state, amountRequested: match.amountRequested } : null;
+  } catch {
+    return null;
+  }
+}
+
 async function createRequest(config, body) {
   const resp = await fetch(`${API_BASE}/vacations/requests`, {
     method: "POST",
@@ -27,27 +60,57 @@ async function createRequest(config, body) {
     },
     body: JSON.stringify(body),
   });
-  
+
   const data = await resp.json();
-  
+
   if (!resp.ok) {
     // Verificar si es error de token expirado
     if (isTokenExpiredError(resp.status, data)) {
       return { tokenExpired: true, status: resp.status, data };
     }
-    return { 
-      ok: false, 
-      status: resp.status, 
-      error: translateError(data.message || data.code || JSON.stringify(data), body.policyTypeId, body.issuerId),
-      details: data 
+
+    const rawMsg = data.message || data.code || JSON.stringify(data);
+
+    // Si es solapamiento, intentar recuperar la request existente
+    if ((rawMsg || "").toLowerCase().includes("overlapping")) {
+      const existing = await findExistingRequest(
+        config,
+        body.issuerId,
+        body.policyTypeId,
+        body.from?.date,
+        body.to?.date
+      );
+      if (existing) {
+        return {
+          ok: true,
+          id: existing.id,
+          state: existing.state,
+          amountRequested: existing.amountRequested,
+          alreadyExisted: true,
+        };
+      }
+      // No se pudo encontrar la request existente, devolver error descriptivo
+      return {
+        ok: false,
+        status: resp.status,
+        error: "Ya existe una solicitud en esas fechas (no se pudo recuperar el ID)",
+        details: data,
+      };
+    }
+
+    return {
+      ok: false,
+      status: resp.status,
+      error: translateError(rawMsg, body.policyTypeId, body.issuerId),
+      details: data
     };
   }
-  
-  return { 
-    ok: true, 
-    id: data.id, 
-    state: data.state, 
-    amountRequested: data.amountRequested 
+
+  return {
+    ok: true,
+    id: data.id,
+    state: data.state,
+    amountRequested: data.amountRequested
   };
 }
 
@@ -75,5 +138,11 @@ export default async function handler(req, res) {
     return res.status(result.status || 502).json({ error: result.error, details: result.details });
   }
 
-  res.status(201).json({ id: result.id, state: result.state, amountRequested: result.amountRequested });
+  const status = result.alreadyExisted ? 200 : 201;
+  res.status(status).json({
+    id: result.id,
+    state: result.state,
+    amountRequested: result.amountRequested,
+    alreadyExisted: result.alreadyExisted || false,
+  });
 }
