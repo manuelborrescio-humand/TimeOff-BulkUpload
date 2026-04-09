@@ -59,6 +59,9 @@ export default function Home() {
           name: authData.instanceName || form.name.trim(),
           apiKey: form.apiKey.trim(),
           jwtToken: authData.jwtToken,
+          refreshToken: authData.refreshToken || "",
+          instanceId: authData.instanceId || "",
+          employeeInternalId: authData.employeeInternalId || "",
           createdBy: form.createdBy.trim(),
         }),
       });

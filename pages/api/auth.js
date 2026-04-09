@@ -40,6 +40,9 @@ export default async function handler(req, res) {
 
     res.status(200).json({
       jwtToken: loginData.accessToken,
+      refreshToken: loginData.refreshToken || "",
+      instanceId,
+      employeeInternalId,
       instanceName: loginData.instance?.name || "",
       userName: `${loginData.user?.firstName || ""} ${loginData.user?.lastName || ""}`.trim(),
       userEmail: loginData.user?.email || "",

@@ -3,8 +3,8 @@ import { put, list } from "@vercel/blob";
 const API_BASE = "https://api-prod.humand.co";
 const BLOB_KEY = "config/clients.json";
 
-// JWT tokens de Humand típicamente expiran en ~1 hora, refrescamos a los 45 min
-const TOKEN_REFRESH_THRESHOLD_MS = 45 * 60 * 1000;
+// JWT tokens de Humand duran 15 minutos, refrescamos a los 10 min
+const TOKEN_REFRESH_THRESHOLD_MS = 10 * 60 * 1000;
 
 async function readBlobClients() {
   try {
@@ -77,63 +77,49 @@ function isTokenExpiringSoon(token) {
 }
 
 /**
- * Obtiene un nuevo JWT usando la API Key
+ * Refresca el JWT usando el refresh token de Humand (sin necesitar contraseña)
+ * Devuelve { accessToken, refreshToken } o null si falla
  */
-async function refreshJwtToken(apiKey) {
-  // 1. Obtener employeeInternalId del usuario
-  const meRes = await fetch(`${API_BASE}/public/api/v1/users/me`, {
-    headers: { Authorization: `Basic ${apiKey}`, "Content-Type": "application/json" },
-  });
-  if (!meRes.ok) {
-    throw new Error("API Key inválida o expirada");
-  }
-  const meData = await meRes.json();
-  const employeeInternalId = meData.employeeInternalId;
+async function refreshJwtToken(client) {
+  const { refreshToken, instanceId, employeeInternalId, apiKey } = client || {};
 
-  // 2. Obtener instanceId desde balances
-  const balRes = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, {
-    headers: { Authorization: `Basic ${apiKey}`, "Content-Type": "application/json" },
-  });
-  if (!balRes.ok) {
-    throw new Error("No se pudo obtener instanceId");
-  }
-  const balData = await balRes.json();
-  if (!balData.items || balData.items.length === 0) {
-    throw new Error("No hay políticas de ausencia configuradas");
-  }
-  const instanceId = balData.items[0].user.instanceId;
-
-  // 3. Login usando API key como password (método alternativo sin contraseña del usuario)
-  // Humand permite autenticación con la API key en ciertos endpoints
-  // Intentamos obtener un token de sesión usando el endpoint de service account
-  const loginRes = await fetch(`${API_BASE}/api/v1/auth/service-login`, {
-    method: "POST",
-    headers: { 
-      "Content-Type": "application/json",
-      Authorization: `Basic ${apiKey}`,
-    },
-    body: JSON.stringify({ employeeInternalId, instanceId }),
-  });
-  
-  if (loginRes.ok) {
-    const loginData = await loginRes.json();
-    return loginData.accessToken;
+  // Estrategia 1: usar el refresh token (método correcto según Humand)
+  if (refreshToken) {
+    const refreshRes = await fetch(`${API_BASE}/api/v1/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${refreshToken}`,
+      },
+      body: JSON.stringify({ refreshToken }),
+    });
+    if (refreshRes.ok) {
+      const data = await refreshRes.json();
+      if (data.accessToken) {
+        console.log("[Auth] JWT refrescado con refresh token");
+        return { accessToken: data.accessToken, refreshToken: data.refreshToken || refreshToken };
+      }
+    }
+    console.log("[Auth] Refresh token falló, intentando re-login con datos guardados...");
   }
 
-  // Si service-login no funciona, intentamos con el endpoint público
-  // que permite crear requests usando solo la API key
+  // Estrategia 2: re-login usando instanceId y employeeInternalId guardados (requiere apiKey como contraseña)
+  // Esto no funciona sin contraseña del usuario — solo como fallback informativo
   return null;
 }
 
 /**
- * Actualiza el JWT en el blob storage
+ * Actualiza el JWT (y opcionalmente el refresh token) en el blob storage
  */
-async function updateClientJwt(slug, newJwt) {
+async function updateClientJwt(slug, newJwt, newRefreshToken = null) {
   const clients = await readBlobClients();
   const idx = clients.findIndex((c) => c.slug === slug.toLowerCase());
   if (idx !== -1) {
     clients[idx].jwtToken = newJwt;
     clients[idx].jwtRefreshedAt = new Date().toISOString();
+    if (newRefreshToken) {
+      clients[idx].refreshToken = newRefreshToken;
+    }
     await writeBlobClients(clients);
   }
 }
@@ -153,14 +139,15 @@ export async function getClientConfig(clientSlug) {
   
   if (!blobMatch) return null;
 
-  // 3. Verificar si el JWT necesita refresh
+  // 3. Verificar si el JWT necesita refresh (dura 15 min, threshold a los 10 min)
   if (isTokenExpiringSoon(blobMatch.jwtToken)) {
-    console.log(`[Auth] JWT expirando para ${clientSlug}, intentando refresh...`);
+    console.log(`[Auth] JWT expirando para ${clientSlug}, intentando refresh con refresh token...`);
     try {
-      const newJwt = await refreshJwtToken(blobMatch.apiKey);
-      if (newJwt) {
-        await updateClientJwt(clientSlug, newJwt);
-        blobMatch.jwtToken = newJwt;
+      const tokens = await refreshJwtToken(blobMatch);
+      if (tokens) {
+        await updateClientJwt(clientSlug, tokens.accessToken, tokens.refreshToken);
+        blobMatch.jwtToken = tokens.accessToken;
+        if (tokens.refreshToken) blobMatch.refreshToken = tokens.refreshToken;
         console.log(`[Auth] JWT refrescado exitosamente para ${clientSlug}`);
       }
     } catch (err) {
@@ -197,14 +184,15 @@ export async function callWithRetry(clientSlug, apiCall, maxRetries = 1) {
     try {
       const result = await apiCall(config);
       
-      // Si el resultado indica token expirado, intentar refresh
+      // Si el resultado indica token expirado, intentar refresh con refresh token
       if (result.tokenExpired && attempt < maxRetries) {
-        console.log(`[Auth] Token expirado detectado para ${clientSlug}, refrescando...`);
+        console.log(`[Auth] Token expirado detectado para ${clientSlug}, refrescando con refresh token...`);
         try {
-          const newJwt = await refreshJwtToken(config.apiKey);
-          if (newJwt) {
-            await updateClientJwt(clientSlug, newJwt);
-            config = { ...config, jwtToken: newJwt };
+          const tokens = await refreshJwtToken(config);
+          if (tokens) {
+            await updateClientJwt(clientSlug, tokens.accessToken, tokens.refreshToken);
+            config = { ...config, jwtToken: tokens.accessToken };
+            if (tokens.refreshToken) config.refreshToken = tokens.refreshToken;
             continue; // Reintentar con nuevo token
           }
         } catch (refreshErr) {

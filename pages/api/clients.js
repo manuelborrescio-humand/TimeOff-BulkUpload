@@ -23,7 +23,7 @@ export default async function handler(req, res) {
   }
 
   if (req.method === "POST") {
-    const { slug, name, apiKey, jwtToken, createdBy } = req.body;
+    const { slug, name, apiKey, jwtToken, refreshToken, instanceId, employeeInternalId, createdBy } = req.body;
     if (!slug || !name || !apiKey) return res.status(400).json({ error: "slug, name y apiKey son obligatorios" });
 
     const existing = await readBlobClients();
@@ -32,12 +32,15 @@ export default async function handler(req, res) {
     const envClients = getEnvClients();
     if (envClients.some((c) => c.slug === slug)) return res.status(409).json({ error: "Ya existe una comunidad con ese slug" });
 
-    existing.push({ 
-      slug, 
-      name, 
-      apiKey, 
-      jwtToken: jwtToken || "", 
-      createdBy: createdBy || "", 
+    existing.push({
+      slug,
+      name,
+      apiKey,
+      jwtToken: jwtToken || "",
+      refreshToken: refreshToken || "",
+      instanceId: instanceId || "",
+      employeeInternalId: employeeInternalId || "",
+      createdBy: createdBy || "",
       createdAt: new Date().toISOString(),
       jwtRefreshedAt: jwtToken ? new Date().toISOString() : null,
     });
