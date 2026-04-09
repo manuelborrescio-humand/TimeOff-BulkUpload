@@ -1068,6 +1068,34 @@ export default function ClientPage() {
                     <span style={{ color: "#166534", fontWeight: 600 }}>✅ Sin duplicados</span>
                   )}
                   <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+                    <button
+                      style={{ ...styles.btnSmall, backgroundColor: "#eff6ff", color: "#1e40af", fontWeight: 600 }}
+                      onClick={() => {
+                        // Pre-poblar el índice de dedup con TODAS las solicitudes existentes en Humand
+                        // Para cada grupo de duplicados, el original (menor ID) es el que se conserva
+                        const groups = {};
+                        requestsData.items.forEach((r) => {
+                          const key = `${r.userId}|${r.policyTypeId}|${r.fromDate}|${r.toDate}`;
+                          if (!groups[key]) groups[key] = [];
+                          groups[key].push(r);
+                        });
+
+                        let count = 0;
+                        Object.values(groups).forEach((group) => {
+                          // Conservar el de menor ID (el original)
+                          const sorted = [...group].sort((a, b) => Number(a.id) - Number(b.id));
+                          const keeper = sorted[0];
+                          if (keeper.userId && keeper.policyTypeId && keeper.fromDate && keeper.toDate) {
+                            saveDedupEntry(clientSlug, keeper.userId, keeper.policyTypeId, keeper.fromDate, keeper.toDate, keeper.id);
+                            count++;
+                          }
+                        });
+
+                        alert(`✅ Índice sincronizado: ${count} solicitudes registradas como ya existentes.\nAhora podés subir el archivo sin crear duplicados.`);
+                      }}
+                    >
+                      🔄 Sincronizar índice ({requestsData.total})
+                    </button>
                     {requestsData.dupCount > 0 && (
                       <button
                         style={{ ...styles.btnSmall, backgroundColor: "#fef2f2", color: "#991b1b", fontWeight: 600 }}
