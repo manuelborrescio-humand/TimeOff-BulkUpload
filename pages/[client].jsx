@@ -153,6 +153,9 @@ export default function ClientPage() {
   const [refreshError, setRefreshError] = useState("");
   const [tokenStatus, setTokenStatus] = useState(null); // 'ok', 'expiring', 'expired'
   const [authErrorCount, setAuthErrorCount] = useState(0);
+
+  // Contraseña de sesión (en memoria, nunca persistida) para auto-refresh durante carga
+  const [sessionPassword, setSessionPassword] = useState("");
   
   // Estado para exportación consolidada
   const [exporting, setExporting] = useState(false);
@@ -222,6 +225,8 @@ export default function ClientPage() {
       
       setTokenStatus('ok');
       setShowRefreshModal(false);
+      // Guardar la contraseña en sesión para auto-refresh futuro
+      if (refreshPassword && !sessionPassword) setSessionPassword(refreshPassword);
       setRefreshPassword("");
       setAuthErrorCount(0);
       alert("✅ Token refrescado exitosamente. Ya puedes continuar con la carga.");
@@ -670,13 +675,35 @@ export default function ClientPage() {
     setValidatedRows(validated);
   }, [step, rows, users, policyTypes, columnMap]);
 
+  // Auto-refresh silencioso usando la contraseña de sesión
+  // Devuelve true si el refresh fue exitoso
+  const doAutoRefresh = async (pwd) => {
+    if (!pwd) return false;
+    try {
+      const res = await fetch(`/api/${clientSlug}/refresh-token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pwd }),
+      });
+      if (res.ok) {
+        setTokenStatus("ok");
+        setAuthErrorCount(0);
+        return true;
+      }
+    } catch {}
+    return false;
+  };
+
   const executeAll = async () => {
     setProcessing(true);
     setStep("executing");
     setAuthErrorCount(0);
     const newResults = {};
     let consecutiveAuthErrors = 0;
-    
+    // Cada PROACTIVE_REFRESH_EVERY requests exitosos, refrescamos token preventivamente
+    const PROACTIVE_REFRESH_EVERY = 5;
+    let successfulRequests = 0;
+
     for (let i = 0; i < validatedRows.length; i++) {
       const row = validatedRows[i];
       if (!row.valid) {
@@ -684,8 +711,14 @@ export default function ClientPage() {
         setResults({ ...newResults });
         continue;
       }
-      
-      // Si hay muchos errores de auth consecutivos, pausar y pedir refresh
+
+      // Refresh preventivo: cada N requests exitosos refrescamos el token
+      if (sessionPassword && successfulRequests > 0 && successfulRequests % PROACTIVE_REFRESH_EVERY === 0) {
+        console.log(`[Auth] Refresh preventivo después de ${successfulRequests} requests exitosos`);
+        await doAutoRefresh(sessionPassword);
+      }
+
+      // Si hay muchos errores de auth consecutivos, pausar y pedir refresh manual
       if (consecutiveAuthErrors >= 3) {
         setTokenStatus('expired');
         setShowRefreshModal(true);
@@ -694,10 +727,10 @@ export default function ClientPage() {
         setResults({ ...newResults });
         return;
       }
-      
+
       setCurrentIndex(i);
       try {
-        const createRes = await fetch(`/api/${clientSlug}/create`, {
+        let createRes = await fetch(`/api/${clientSlug}/create`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -707,12 +740,31 @@ export default function ClientPage() {
             toDate: row.toDate,
           }),
         });
-        const createData = await createRes.json();
-        
+        let createData = await createRes.json();
+
+        // Si falló por auth, intentar auto-refresh y reintentar una vez
+        if (!createRes.ok && isAuthError(createData.error || "")) {
+          const refreshed = await doAutoRefresh(sessionPassword);
+          if (refreshed) {
+            console.log(`[Auth] Auto-refresh exitoso, reintentando fila ${i + 1}...`);
+            createRes = await fetch(`/api/${clientSlug}/create`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                issuerId: row.userId,
+                policyTypeId: row.policyTypeId,
+                fromDate: row.fromDate,
+                toDate: row.toDate,
+              }),
+            });
+            createData = await createRes.json();
+          }
+        }
+
         if (!createRes.ok) {
           const errorMsg = createData.error || "Error al crear";
           newResults[i] = { ok: false, error: errorMsg };
-          
+
           // Detectar error de autenticación
           if (isAuthError(errorMsg)) {
             consecutiveAuthErrors++;
@@ -720,19 +772,37 @@ export default function ClientPage() {
           } else {
             consecutiveAuthErrors = 0;
           }
-          
+
           setResults({ ...newResults });
           continue;
         }
-        
+
         consecutiveAuthErrors = 0; // Reset si create fue exitoso
-        
-        const approveRes = await fetch(`/api/${clientSlug}/approve`, {
+        successfulRequests++;
+
+        let approveRes = await fetch(`/api/${clientSlug}/approve`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ requestId: createData.id }),
         });
-        
+
+        // Si approve falló por auth, auto-refresh y reintentar
+        if (!approveRes.ok) {
+          const approveDataTmp = await approveRes.json().catch(() => ({}));
+          const errTmp = approveDataTmp.error || "Creada pero no se pudo aprobar";
+          if (isAuthError(errTmp)) {
+            const refreshed = await doAutoRefresh(sessionPassword);
+            if (refreshed) {
+              console.log(`[Auth] Auto-refresh exitoso, reintentando approve de fila ${i + 1}...`);
+              approveRes = await fetch(`/api/${clientSlug}/approve`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ requestId: createData.id }),
+              });
+            }
+          }
+        }
+
         if (approveRes.ok) {
           const humandDays = createData.amountRequested;
           const expected = row.expectedDays;
@@ -742,7 +812,7 @@ export default function ClientPage() {
           const approveData = await approveRes.json().catch(() => ({}));
           const errorMsg = approveData.error || "Creada pero no se pudo aprobar";
           newResults[i] = { ok: false, error: errorMsg, requestId: createData.id };
-          
+
           if (isAuthError(errorMsg)) {
             consecutiveAuthErrors++;
             setAuthErrorCount((prev) => prev + 1);
@@ -1215,6 +1285,24 @@ export default function ClientPage() {
                         </tbody>
                       </table>
                     </div>
+                  </div>
+
+                  <div style={{ margin: "16px 0 8px", padding: "14px 16px", backgroundColor: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+                    <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#475569", marginBottom: 6 }}>
+                      🔐 Contraseña de admin <span style={{ fontWeight: 400, color: "#94a3b8" }}>(recomendado)</span>
+                    </label>
+                    <input
+                      type="password"
+                      value={sessionPassword}
+                      onChange={(e) => setSessionPassword(e.target.value)}
+                      placeholder="Contraseña de Humand"
+                      style={{ ...styles.input, marginBottom: 6 }}
+                    />
+                    <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>
+                      {sessionPassword
+                        ? "✅ El token se refrescará automáticamente si expira durante la carga."
+                        : "Si el token expira durante la carga, la sesión se pausará para pedir la contraseña manualmente."}
+                    </p>
                   </div>
 
                   <div style={styles.actions}>
