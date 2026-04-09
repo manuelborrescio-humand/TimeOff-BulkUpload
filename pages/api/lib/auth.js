@@ -158,6 +158,14 @@ export async function getClientConfig(clientSlug) {
   const match = blobMatch || envMatch || null;
   if (!match) return null;
 
+  // Enriquecer con instanceId desde env var si no está en el config
+  // Patrón: CLIENT_{SLUG}_INSTANCE_ID (ej: CLIENT_ANUNCIAR_INSTANCE_ID=176290)
+  if (!match.instanceId) {
+    const slugUpper = slug.toUpperCase().replace(/-/g, "_");
+    const envInstanceId = process.env[`CLIENT_${slugUpper}_INSTANCE_ID`];
+    if (envInstanceId) match.instanceId = envInstanceId;
+  }
+
   // 3. Verificar si el JWT necesita refresh (dura 15 min, threshold a los 10 min)
   if (isTokenExpiringSoon(match.jwtToken)) {
     console.log(`[Auth] JWT expirando para ${clientSlug}, intentando refresh con refresh token...`);
