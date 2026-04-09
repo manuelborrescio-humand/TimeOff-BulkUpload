@@ -202,18 +202,19 @@ export default function ClientPage() {
   }, []);
 
   const handleRefreshToken = async () => {
-    if (!refreshPassword.trim()) {
+    const pwdToUse = refreshPassword.trim() || sessionPassword.trim();
+    if (!pwdToUse) {
       setRefreshError("La contraseña es obligatoria");
       return;
     }
     setRefreshing(true);
     setRefreshError("");
-    
+
     try {
       const res = await fetch(`/api/${clientSlug}/refresh-token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: refreshPassword }),
+        body: JSON.stringify({ password: pwdToUse }),
       });
       const data = await res.json();
       
@@ -923,13 +924,16 @@ export default function ClientPage() {
           <div style={styles.modal}>
             <h3 style={styles.modalTitle}>🔐 Sesión expirada</h3>
             <p style={styles.modalText}>
-              El token de autenticación ha expirado. Ingresa tu contraseña de Humand para continuar.
+              El token expiró. Ingresá la contraseña para continuar desde donde se pausó.
+              {sessionPassword && <span style={{ color: "#16a34a", display: "block", marginTop: 4, fontSize: 12 }}>
+                (ya tenés la contraseña guardada en sesión — hacé clic en "Refrescar")
+              </span>}
             </p>
             <div style={styles.formGroup}>
               <label style={styles.formLabel}>Contraseña de Humand</label>
               <input
                 type="password"
-                value={refreshPassword}
+                value={refreshPassword || sessionPassword}
                 onChange={(e) => setRefreshPassword(e.target.value)}
                 placeholder="Tu contraseña de Humand"
                 style={styles.input}
@@ -1192,28 +1196,51 @@ export default function ClientPage() {
           )}
 
           {step === "upload" && (
-            <div
-              style={{ ...styles.dropzone, borderColor: dragOver ? "#2563eb" : "#cbd5e1", backgroundColor: dragOver ? "#eff6ff" : "#fff" }}
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={onDrop}
-              onClick={() => fileRef.current?.click()}
-            >
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".xlsx,.xls,.csv"
-                style={{ display: "none" }}
-                onChange={(e) => handleFile(e.target.files[0])}
-              />
-              <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
-              <p style={{ margin: 0, fontWeight: 600, color: "#334155" }}>
-                Arrastra un archivo Excel o CSV aquí
-              </p>
-              <p style={{ margin: "4px 0 0", fontSize: 13, color: "#94a3b8" }}>
-                o haz clic para seleccionar
-              </p>
-            </div>
+            <>
+              {/* Contraseña de sesión — al inicio, antes del archivo */}
+              <div style={{ marginBottom: 16, padding: "14px 16px", backgroundColor: sessionPassword ? "#f0fdf4" : "#fff7ed", borderRadius: 8, border: `1px solid ${sessionPassword ? "#bbf7d0" : "#fed7aa"}` }}>
+                <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#475569", marginBottom: 6 }}>
+                  🔐 Contraseña de admin Humand
+                  {!sessionPassword && <span style={{ color: "#ea580c", marginLeft: 6 }}>— necesaria para auto-refresh del token</span>}
+                </label>
+                <input
+                  type="password"
+                  value={sessionPassword}
+                  onChange={(e) => setSessionPassword(e.target.value)}
+                  placeholder="Ingresá tu contraseña de Humand"
+                  style={{ ...styles.input, marginBottom: 4, borderColor: sessionPassword ? "#86efac" : "#fdba74" }}
+                  autoComplete="current-password"
+                />
+                <p style={{ margin: 0, fontSize: 12, color: sessionPassword ? "#16a34a" : "#9a3412" }}>
+                  {sessionPassword
+                    ? "✅ El token se refrescará automáticamente si expira durante la carga."
+                    : "⚠️ Sin contraseña, la carga se pausará cada ~10 min para pedir autenticación manual."}
+                </p>
+              </div>
+
+              <div
+                style={{ ...styles.dropzone, borderColor: dragOver ? "#2563eb" : "#cbd5e1", backgroundColor: dragOver ? "#eff6ff" : "#fff" }}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={onDrop}
+                onClick={() => fileRef.current?.click()}
+              >
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  style={{ display: "none" }}
+                  onChange={(e) => handleFile(e.target.files[0])}
+                />
+                <div style={{ fontSize: 40, marginBottom: 8 }}>📄</div>
+                <p style={{ margin: 0, fontWeight: 600, color: "#334155" }}>
+                  Arrastra un archivo Excel o CSV aquí
+                </p>
+                <p style={{ margin: "4px 0 0", fontSize: 13, color: "#94a3b8" }}>
+                  o haz clic para seleccionar
+                </p>
+              </div>
+            </>
           )}
 
           {step === "mapping" && (
@@ -1304,24 +1331,6 @@ export default function ClientPage() {
                         </tbody>
                       </table>
                     </div>
-                  </div>
-
-                  <div style={{ margin: "16px 0 8px", padding: "14px 16px", backgroundColor: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
-                    <label style={{ display: "block", fontSize: 13, fontWeight: 600, color: "#475569", marginBottom: 6 }}>
-                      🔐 Contraseña de admin <span style={{ fontWeight: 400, color: "#94a3b8" }}>(recomendado)</span>
-                    </label>
-                    <input
-                      type="password"
-                      value={sessionPassword}
-                      onChange={(e) => setSessionPassword(e.target.value)}
-                      placeholder="Contraseña de Humand"
-                      style={{ ...styles.input, marginBottom: 6 }}
-                    />
-                    <p style={{ margin: 0, fontSize: 12, color: "#64748b" }}>
-                      {sessionPassword
-                        ? "✅ El token se refrescará automáticamente si expira durante la carga."
-                        : "Si el token expira durante la carga, la sesión se pausará para pedir la contraseña manualmente."}
-                    </p>
                   </div>
 
                   <div style={styles.actions}>

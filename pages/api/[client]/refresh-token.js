@@ -1,6 +1,51 @@
-import { getClientConfig, readBlobClients, writeBlobClients } from "../lib/auth";
+import { readBlobClients, writeBlobClients } from "../lib/auth";
 
 const API_BASE = "https://api-prod.humand.co";
+
+/**
+ * Lookup directo del cliente: busca en blob primero, luego intenta
+ * construir la config desde env vars usando el slug directamente.
+ * NO depende de getEnvClients() (que requiere CLIENT_X_NAME configurado).
+ */
+async function findClient(slug) {
+  const lower = slug.toLowerCase();
+
+  // 1. Buscar en blob (máxima prioridad — tiene tokens más frescos)
+  try {
+    const blobClients = await readBlobClients();
+    const blobMatch = blobClients.find((c) => c.slug === lower);
+    if (blobMatch) return { client: blobMatch, source: "blob" };
+  } catch {}
+
+  // 2. Buscar en env vars directo usando el slug
+  // Probamos múltiples formatos de nombre: ANUNCIAR, anunciar, ANUNCIAR_COM, etc.
+  const variants = [
+    slug.toUpperCase().replace(/-/g, "_"),           // anunciar → ANUNCIAR
+    slug.toLowerCase().replace(/-/g, "_"),            // anunciar → anunciar
+    slug.replace(/-/g, "_"),                          // as-is
+  ];
+
+  for (const variant of variants) {
+    const apiKey = process.env[`CLIENT_${variant}_API_KEY`];
+    if (apiKey) {
+      return {
+        client: {
+          slug: lower,
+          name: process.env[`CLIENT_${variant}_NAME`] || slug,
+          apiKey,
+          jwtToken: process.env[`CLIENT_${variant}_JWT_TOKEN`] || "",
+          refreshToken: process.env[`CLIENT_${variant}_REFRESH_TOKEN`] || "",
+          instanceId: "",
+          employeeInternalId: "",
+          source: "env_direct",
+        },
+        source: "env",
+      };
+    }
+  }
+
+  return null;
+}
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -8,46 +53,53 @@ export default async function handler(req, res) {
   const clientSlug = req.query.client;
   const { password } = req.body;
 
-  // Buscar el cliente (busca en blob Y en env vars)
-  const client = await getClientConfig(clientSlug);
-
-  if (!client) {
-    return res.status(404).json({ error: "Cliente no encontrado" });
+  const found = await findClient(clientSlug);
+  if (!found) {
+    return res.status(404).json({
+      error: `Cliente '${clientSlug}' no encontrado en blob ni en variables de entorno`,
+    });
   }
 
-  // Para el upsert en blob necesitamos el array mutable
-  const clients = await readBlobClients();
-  const clientIdx = clients.findIndex((c) => c.slug === clientSlug.toLowerCase());
+  const { client } = found;
 
-  // Helper: guarda el token actualizado en blob (upsert — crea entrada si el cliente es de env vars)
+  // Mutable array de blob para hacer upsert al final
+  let blobClients = [];
+  let clientIdx = -1;
+  try {
+    blobClients = await readBlobClients();
+    clientIdx = blobClients.findIndex((c) => c.slug === clientSlug.toLowerCase());
+  } catch {}
+
+  // Helper: guarda el token actualizado en blob (upsert)
   const saveToBlob = async (newJwt, newRefreshToken, extraFields = {}) => {
     const now = new Date().toISOString();
+    const updated = {
+      slug: clientSlug.toLowerCase(),
+      name: client.name || clientSlug,
+      apiKey: client.apiKey || "",
+      jwtToken: newJwt,
+      refreshToken: newRefreshToken || client.refreshToken || "",
+      instanceId: client.instanceId || "",
+      employeeInternalId: client.employeeInternalId || "",
+      createdBy: client.createdBy || "env",
+      createdAt: client.createdAt || now,
+      jwtRefreshedAt: now,
+      source: found.source === "blob" ? "blob" : "env_migrated",
+      ...extraFields,
+    };
+
     if (clientIdx !== -1) {
-      clients[clientIdx] = {
-        ...clients[clientIdx],
-        jwtToken: newJwt,
-        jwtRefreshedAt: now,
-        ...(newRefreshToken ? { refreshToken: newRefreshToken } : {}),
-        ...extraFields,
-      };
+      blobClients[clientIdx] = { ...blobClients[clientIdx], ...updated };
     } else {
-      // Cliente de env vars: insertar en blob para que los próximos getClientConfig() usen el token fresco
-      clients.push({
-        slug: clientSlug.toLowerCase(),
-        name: client.name || clientSlug,
-        apiKey: client.apiKey || "",
-        jwtToken: newJwt,
-        refreshToken: newRefreshToken || client.refreshToken || "",
-        instanceId: client.instanceId || "",
-        employeeInternalId: client.employeeInternalId || "",
-        createdBy: client.createdBy || "env",
-        createdAt: client.createdAt || now,
-        jwtRefreshedAt: now,
-        source: "env_migrated",
-        ...extraFields,
-      });
+      blobClients.push(updated);
     }
-    await writeBlobClients(clients);
+
+    try {
+      await writeBlobClients(blobClients);
+    } catch (e) {
+      console.error("[refresh-token] Error escribiendo en blob:", e.message);
+      // No es fatal — el token fue obtenido igual
+    }
     return now;
   };
 
@@ -66,7 +118,10 @@ export default async function handler(req, res) {
       if (refreshRes.ok) {
         const refreshData = await refreshRes.json();
         if (refreshData.accessToken) {
-          const refreshedAt = await saveToBlob(refreshData.accessToken, refreshData.refreshToken || null);
+          const refreshedAt = await saveToBlob(
+            refreshData.accessToken,
+            refreshData.refreshToken || client.refreshToken
+          );
           return res.status(200).json({
             success: true,
             method: "refresh_token",
@@ -75,26 +130,28 @@ export default async function handler(req, res) {
           });
         }
       }
-      console.log("[refresh-token] Refresh token falló, intentando con contraseña...");
+      console.log("[refresh-token] Refresh token no funcionó, requiere contraseña");
     }
 
-    // Estrategia 2: re-login con contraseña (fallback)
+    // Estrategia 2: re-login con contraseña
     if (!password) {
       return res.status(400).json({
-        error: "El refresh token expiró o no está disponible. Ingresá la contraseña para renovar la sesión.",
+        error: "Ingresá la contraseña de Humand para renovar la sesión.",
       });
     }
 
-    // Usar instanceId y employeeInternalId guardados si están disponibles
+    // Obtener employeeInternalId e instanceId (desde cache o via API)
     let employeeInternalId = client.employeeInternalId;
     let instanceId = client.instanceId;
 
-    // Si no están guardados, obtenerlos de la API
     if (!employeeInternalId) {
       const meRes = await fetch(`${API_BASE}/public/api/v1/users/me`, {
         headers: { Authorization: `Basic ${client.apiKey}`, "Content-Type": "application/json" },
       });
-      if (!meRes.ok) return res.status(401).json({ error: "API Key inválida" });
+      if (!meRes.ok) {
+        const meText = await meRes.text().catch(() => "");
+        return res.status(401).json({ error: `API Key inválida (status ${meRes.status}): ${meText.slice(0, 100)}` });
+      }
       const meData = await meRes.json();
       employeeInternalId = meData.employeeInternalId;
     }
@@ -111,7 +168,7 @@ export default async function handler(req, res) {
       instanceId = balData.items[0].user.instanceId;
     }
 
-    // Login para obtener nuevo JWT y refresh token
+    // Login
     const loginRes = await fetch(`${API_BASE}/api/v1/auth/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -140,6 +197,6 @@ export default async function handler(req, res) {
     });
 
   } catch (err) {
-    res.status(502).json({ error: "Error de conexión", details: err.message });
+    res.status(502).json({ error: "Error de conexión: " + err.message });
   }
 }
