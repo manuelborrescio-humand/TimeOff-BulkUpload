@@ -1,6 +1,6 @@
 import { callWithRetry } from "../lib/auth";
 
-const API_BASE = "https://api-prod.humand.co/api/v1";
+const API_BASE = "https://api-prod.humand.co";
 const PAGE_SIZE = 100;
 
 export default async function handler(req, res) {
@@ -9,6 +9,25 @@ export default async function handler(req, res) {
   const clientSlug = req.query.client;
 
   const result = await callWithRetry(clientSlug, async (config) => {
+    // instanceId is required by Humand API — fetch it if not cached in config
+    let instanceId = config.instanceId;
+    if (!instanceId) {
+      const balRes = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, {
+        headers: {
+          Authorization: `Basic ${config.apiKey}`,
+          "Content-Type": "application/json",
+        },
+      });
+      if (!balRes.ok) {
+        return { ok: false, status: balRes.status, error: "No se pudo obtener instanceId para listar solicitudes" };
+      }
+      const balData = await balRes.json();
+      instanceId = balData.items?.[0]?.user?.instanceId;
+      if (!instanceId) {
+        return { ok: false, status: 400, error: "No se encontró instanceId en las políticas del cliente" };
+      }
+    }
+
     const allItems = [];
     let page = 0;
     let hasMore = true;
@@ -17,9 +36,10 @@ export default async function handler(req, res) {
       const params = new URLSearchParams({
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
+        instanceId,
       });
 
-      const resp = await fetch(`${API_BASE}/vacations/requests?${params}`, {
+      const resp = await fetch(`${API_BASE}/api/v1/vacations/requests?${params}`, {
         headers: {
           Authorization: `Bearer ${config.jwtToken}`,
           "Content-Type": "application/json",
