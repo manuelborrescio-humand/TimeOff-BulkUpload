@@ -164,6 +164,12 @@ export default function ClientPage() {
   const [showVerifyModal, setShowVerifyModal] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const verifyFileRef = useRef(null);
+
+  // Estado para visor de solicitudes Humand
+  const [showRequestsModal, setShowRequestsModal] = useState(false);
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [requestsData, setRequestsData] = useState(null);
+  const [requestsError, setRequestsError] = useState("");
   
   const fileRef = useRef(null);
 
@@ -676,6 +682,53 @@ export default function ClientPage() {
     setValidatedRows(validated);
   }, [step, rows, users, policyTypes, columnMap]);
 
+  const loadAllRequests = async () => {
+    setRequestsLoading(true);
+    setRequestsError("");
+    setRequestsData(null);
+    setShowRequestsModal(true);
+    try {
+      const res = await fetch(`/api/${clientSlug}/all-requests`);
+      const data = await res.json();
+      if (!res.ok) { setRequestsError(data.error || "Error cargando solicitudes"); setRequestsLoading(false); return; }
+
+      const items = data.items || [];
+
+      // Normalizar campos (distintos formatos posibles de la API)
+      const normalized = items.map((r) => ({
+        id: r.id,
+        userId: r.issuerId || r.userId || r.issuer?.id,
+        userName: r.issuer ? `${r.issuer.firstName || ""} ${r.issuer.lastName || ""}`.trim() : (r.userName || ""),
+        userEmail: r.issuer?.email || r.userEmail || "",
+        policy: r.policyType?.name || r.policyTypeName || r.policy || "",
+        policyTypeId: r.policyTypeId || r.policyType?.id || "",
+        fromDate: r.from?.date || r.fromDate || "",
+        toDate: r.to?.date || r.toDate || "",
+        state: r.state || "",
+        amount: r.amountRequested ?? r.amount ?? "",
+        createdAt: r.createdAt || r.requestedAt || "",
+      }));
+
+      // Detectar duplicados: mismo userId + policyTypeId + fromDate + toDate
+      const seen = {};
+      normalized.forEach((r) => {
+        const key = `${r.userId}|${r.policyTypeId}|${r.fromDate}|${r.toDate}`;
+        if (!seen[key]) seen[key] = [];
+        seen[key].push(r.id);
+      });
+      const withDup = normalized.map((r) => {
+        const key = `${r.userId}|${r.policyTypeId}|${r.fromDate}|${r.toDate}`;
+        return { ...r, isDuplicate: seen[key].length > 1, dupIds: seen[key] };
+      });
+
+      const dupCount = withDup.filter((r) => r.isDuplicate).length;
+      setRequestsData({ items: withDup, total: withDup.length, dupCount });
+    } catch (e) {
+      setRequestsError("Error de conexión: " + e.message);
+    }
+    setRequestsLoading(false);
+  };
+
   // Auto-refresh silencioso usando la contraseña de sesión
   // Devuelve true si el refresh fue exitoso
   const doAutoRefresh = async (pwd) => {
@@ -978,6 +1031,133 @@ export default function ClientPage() {
         </div>
       )}
 
+      {/* Modal: solicitudes en Humand con detección de duplicados */}
+      {showRequestsModal && (
+        <div style={{ ...styles.modalOverlay, alignItems: "flex-start", paddingTop: 40 }}>
+          <div style={{ ...styles.modal, width: "min(95vw, 1100px)", maxHeight: "85vh", display: "flex", flexDirection: "column" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <h3 style={{ ...styles.modalTitle, margin: 0 }}>
+                📋 Solicitudes en Humand — {clientName}
+              </h3>
+              <button style={{ ...styles.btnSmall, fontSize: 18, lineHeight: 1 }} onClick={() => setShowRequestsModal(false)}>✕</button>
+            </div>
+
+            {requestsLoading && (
+              <div style={{ textAlign: "center", padding: 40, color: "#64748b" }}>
+                Cargando solicitudes... (puede tardar si hay muchas)
+              </div>
+            )}
+
+            {requestsError && (
+              <div style={{ padding: 16, backgroundColor: "#fef2f2", borderRadius: 6, color: "#991b1b", marginBottom: 12 }}>
+                {requestsError}
+              </div>
+            )}
+
+            {requestsData && (
+              <>
+                <div style={{ display: "flex", gap: 16, marginBottom: 16, fontSize: 13 }}>
+                  <span style={{ color: "#334155" }}>
+                    <strong>{requestsData.total}</strong> solicitudes en total
+                  </span>
+                  {requestsData.dupCount > 0 ? (
+                    <span style={{ color: "#991b1b", fontWeight: 600 }}>
+                      ⚠️ {requestsData.dupCount} filas con duplicados detectados
+                    </span>
+                  ) : (
+                    <span style={{ color: "#166534", fontWeight: 600 }}>✅ Sin duplicados</span>
+                  )}
+                  <button
+                    style={{ ...styles.btnSmall, marginLeft: "auto" }}
+                    onClick={() => {
+                      const rows = requestsData.items.map((r) => ({
+                        "Request ID": r.id,
+                        "Usuario": r.userName,
+                        "Email": r.userEmail,
+                        "Política": r.policy,
+                        "Desde": r.fromDate,
+                        "Hasta": r.toDate,
+                        "Días": r.amount,
+                        "Estado": r.state,
+                        "Creada": r.createdAt ? new Date(r.createdAt).toLocaleString("es-AR") : "",
+                        "Duplicado": r.isDuplicate ? `Sí (IDs: ${r.dupIds.join(", ")})` : "No",
+                      }));
+                      const ws = XLSX.utils.json_to_sheet(rows);
+                      ws["!cols"] = [{ wch: 12 }, { wch: 22 }, { wch: 30 }, { wch: 18 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 20 }, { wch: 35 }];
+                      const wb = XLSX.utils.book_new();
+                      XLSX.utils.book_append_sheet(wb, ws, "Solicitudes");
+                      XLSX.writeFile(wb, `solicitudes-${clientSlug}-${new Date().toISOString().slice(0, 10)}.xlsx`);
+                    }}
+                  >
+                    📥 Exportar Excel
+                  </button>
+                </div>
+
+                <div style={{ overflowY: "auto", flex: 1, borderRadius: 6, border: "1px solid #e2e8f0" }}>
+                  <table style={{ ...styles.table, margin: 0 }}>
+                    <thead style={{ position: "sticky", top: 0, backgroundColor: "#f8fafc", zIndex: 1 }}>
+                      <tr>
+                        <th style={styles.th}>ID</th>
+                        <th style={styles.th}>Usuario</th>
+                        <th style={styles.th}>Política</th>
+                        <th style={styles.th}>Desde</th>
+                        <th style={styles.th}>Hasta</th>
+                        <th style={styles.th}>Días</th>
+                        <th style={styles.th}>Estado</th>
+                        <th style={styles.th}>Creada</th>
+                        <th style={styles.th}>Dup.</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {requestsData.items
+                        .sort((a, b) => {
+                          // Duplicados primero, luego por usuario
+                          if (a.isDuplicate !== b.isDuplicate) return a.isDuplicate ? -1 : 1;
+                          return (a.userName || "").localeCompare(b.userName || "");
+                        })
+                        .map((r) => (
+                          <tr key={r.id} style={{ backgroundColor: r.isDuplicate ? "#fff1f2" : "transparent" }}>
+                            <td style={{ ...styles.td, fontFamily: "monospace", fontSize: 12 }}>#{r.id}</td>
+                            <td style={styles.td}>
+                              <div style={{ fontWeight: 500 }}>{r.userName}</div>
+                              <div style={{ fontSize: 11, color: "#94a3b8" }}>{r.userEmail}</div>
+                            </td>
+                            <td style={styles.td}>{r.policy}</td>
+                            <td style={styles.td}>{r.fromDate}</td>
+                            <td style={styles.td}>{r.toDate}</td>
+                            <td style={{ ...styles.td, textAlign: "center" }}>{r.amount}</td>
+                            <td style={styles.td}>
+                              <span style={{
+                                padding: "2px 6px", borderRadius: 4, fontSize: 11, fontWeight: 600,
+                                backgroundColor: r.state === "APPROVED" ? "#dcfce7" : r.state === "PENDING" ? "#fef9c3" : "#f1f5f9",
+                                color: r.state === "APPROVED" ? "#166534" : r.state === "PENDING" ? "#854d0e" : "#475569",
+                              }}>
+                                {r.state === "APPROVED" ? "Aprobada" : r.state === "PENDING" ? "Pendiente" : r.state || "-"}
+                              </span>
+                            </td>
+                            <td style={{ ...styles.td, fontSize: 12, color: "#64748b" }}>
+                              {r.createdAt ? new Date(r.createdAt).toLocaleDateString("es-AR") : "-"}
+                            </td>
+                            <td style={{ ...styles.td, textAlign: "center" }}>
+                              {r.isDuplicate && (
+                                <span title={`IDs duplicados: ${r.dupIds.join(", ")}`} style={{ color: "#dc2626", fontWeight: 700, fontSize: 16 }}>⚠️</span>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 16 }}>
+              <button style={styles.btnSecondary} onClick={() => setShowRequestsModal(false)}>Cerrar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Modal de verificación de pendientes */}
       {showVerifyModal && (
         <div style={styles.modalOverlay}>
@@ -1184,14 +1364,20 @@ export default function ClientPage() {
                       <strong style={{ color: "#991b1b" }}>{history.reduce((sum, e) => sum + (e.errorCount || 0), 0)}</strong> errores
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button 
+                      <button
+                        style={styles.btnSecondary}
+                        onClick={loadAllRequests}
+                      >
+                        🔎 Ver solicitudes en Humand
+                      </button>
+                      <button
                         style={styles.btnSecondary}
                         onClick={() => setShowVerifyModal(true)}
                       >
                         🔍 Verificar pendientes
                       </button>
-                      <button 
-                        style={{ ...styles.btnSecondary, opacity: exporting ? 0.6 : 1 }} 
+                      <button
+                        style={{ ...styles.btnSecondary, opacity: exporting ? 0.6 : 1 }}
                         onClick={exportConsolidated}
                         disabled={exporting}
                       >
