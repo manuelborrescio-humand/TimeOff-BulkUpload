@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import Head from "next/head";
 import Link from "next/link";
 import * as XLSX from "xlsx";
-import { getHistory, addHistoryEntry, deleteHistoryEntry, updateHistoryEntry, generateEntryId } from "../lib/history";
+import { getHistory, addHistoryEntry, deleteHistoryEntry, updateHistoryEntry, generateEntryId, getDedupMap, saveDedupEntry, dedupMakeKey } from "../lib/history";
 
 const COLUMN_PATTERNS = {
   email: [/usuario/i, /email/i, /correo/i, /mail/i, /empleado/i],
@@ -705,11 +705,23 @@ export default function ClientPage() {
     const PROACTIVE_REFRESH_EVERY = 5;
     let successfulRequests = 0;
 
+    // Índice de dedup desde localStorage — previene crear solicitudes duplicadas
+    const dedupMap = getDedupMap(clientSlug);
+
     for (let i = 0; i < validatedRows.length; i++) {
       const row = validatedRows[i];
       if (!row.valid) {
         newResults[i] = { ok: false, error: row.errors.join(", "), skipped: true };
         setResults({ ...newResults });
+        continue;
+      }
+
+      // ── Deduplicación: si ya fue procesada exitosamente, no volver a crear ──
+      const dk = dedupMakeKey(row.userId, row.policyTypeId, row.fromDate, row.toDate);
+      if (dedupMap[dk]) {
+        newResults[i] = { ok: true, requestId: dedupMap[dk].requestId, alreadyExisted: true };
+        setResults({ ...newResults });
+        successfulRequests++;
         continue;
       }
 
@@ -781,7 +793,7 @@ export default function ClientPage() {
         consecutiveAuthErrors = 0; // Reset si create fue exitoso
         successfulRequests++;
 
-        // Si la request ya existía (solapamiento recuperado), no hay que aprobar
+        // Si la request ya existía (solapamiento detectado por Humand), no hay que aprobar
         if (createData.alreadyExisted) {
           newResults[i] = {
             ok: true,
@@ -790,6 +802,9 @@ export default function ClientPage() {
             expectedDays: row.expectedDays,
             alreadyExisted: true,
           };
+          // Guardar en dedup para próximas cargas
+          saveDedupEntry(clientSlug, row.userId, row.policyTypeId, row.fromDate, row.toDate, createData.id);
+          dedupMap[dk] = { requestId: createData.id };
           setResults({ ...newResults });
           continue;
         }
@@ -822,6 +837,9 @@ export default function ClientPage() {
           const expected = row.expectedDays;
           const discrepancy = expected && humandDays && humandDays !== expected ? `Humand contó ${humandDays}, esperados: ${expected} ${row.countingMethod === "BUSINESS_DAYS" ? "hábiles" : "corridos"}` : null;
           newResults[i] = { ok: true, requestId: createData.id, days: humandDays, expectedDays: expected, discrepancy };
+          // Guardar en dedup para evitar crear esta solicitud de nuevo en el futuro
+          saveDedupEntry(clientSlug, row.userId, row.policyTypeId, row.fromDate, row.toDate, createData.id);
+          dedupMap[dk] = { requestId: createData.id };
         } else {
           const approveData = await approveRes.json().catch(() => ({}));
           const errorMsg = approveData.error || "Creada pero no se pudo aprobar";
