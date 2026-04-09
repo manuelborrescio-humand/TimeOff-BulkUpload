@@ -3,41 +3,49 @@ import { callWithRetry } from "../lib/auth";
 const API_BASE = "https://api-prod.humand.co";
 const PAGE_SIZE = 100;
 
+/**
+ * Fetches instanceId from the balances endpoint if not cached in config.
+ * Returns null if it can't be obtained.
+ */
+async function fetchInstanceId(config) {
+  try {
+    const resp = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, {
+      headers: {
+        Authorization: `Basic ${config.apiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    return data.items?.[0]?.user?.instanceId || null;
+  } catch {
+    return null;
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   const clientSlug = req.query.client;
 
   const result = await callWithRetry(clientSlug, async (config) => {
-    // instanceId is required by Humand API — fetch it if not cached in config
-    let instanceId = config.instanceId;
-    if (!instanceId) {
-      const balRes = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, {
-        headers: {
-          Authorization: `Basic ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-      });
-      if (!balRes.ok) {
-        return { ok: false, status: balRes.status, error: "No se pudo obtener instanceId para listar solicitudes" };
-      }
-      const balData = await balRes.json();
-      instanceId = balData.items?.[0]?.user?.instanceId;
-      if (!instanceId) {
-        return { ok: false, status: 400, error: "No se encontró instanceId en las políticas del cliente" };
-      }
-    }
+    // Resolve instanceId: from config cache or from balances endpoint
+    const instanceId = config.instanceId || await fetchInstanceId(config);
 
     const allItems = [];
     let page = 0;
     let hasMore = true;
 
     while (hasMore) {
-      const params = new URLSearchParams({
+      const paramObj = {
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
-        instanceId,
-      });
+      };
+
+      // Include instanceId if we have it (required by Humand for listing all requests)
+      if (instanceId) paramObj.instanceId = instanceId;
+
+      const params = new URLSearchParams(paramObj);
 
       const resp = await fetch(`${API_BASE}/api/v1/vacations/requests?${params}`, {
         headers: {
@@ -49,11 +57,20 @@ export default async function handler(req, res) {
       });
 
       if (!resp.ok) {
+        // Try to get the real Humand error message for debugging
         const data = await resp.json().catch(() => ({}));
+        const humandMsg = data.message || data.code || data.error || JSON.stringify(data);
+
         if (resp.status === 401 || resp.status === 403) {
           return { tokenExpired: true, status: resp.status, data };
         }
-        return { ok: false, status: resp.status, error: data.message || `Error ${resp.status}` };
+        return {
+          ok: false,
+          status: resp.status,
+          error: `Error ${resp.status} de Humand: ${humandMsg}`,
+          humandError: data,
+          instanceIdUsed: instanceId || "(ninguno)",
+        };
       }
 
       const data = await resp.json();
@@ -62,7 +79,7 @@ export default async function handler(req, res) {
 
       allItems.push(...items);
 
-      // Parar si: menos items que el pageSize, o llegamos al total, o array directo (sin paginación)
+      // Stop if: fewer items than pageSize, or reached total, or direct array (no pagination)
       if (
         items.length < PAGE_SIZE ||
         (total !== null && allItems.length >= total) ||
@@ -73,7 +90,7 @@ export default async function handler(req, res) {
         page++;
       }
 
-      // Safety cap: máximo 20 páginas (2000 solicitudes)
+      // Safety cap: max 20 pages (2000 requests)
       if (page >= 20) hasMore = false;
     }
 
@@ -81,7 +98,11 @@ export default async function handler(req, res) {
   });
 
   if (result.error) {
-    return res.status(result.status || 502).json({ error: result.error });
+    return res.status(result.status || 502).json({
+      error: result.error,
+      humandError: result.humandError,
+      instanceIdUsed: result.instanceIdUsed,
+    });
   }
 
   res.status(200).json({ items: result.items, total: result.total });
