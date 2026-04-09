@@ -109,45 +109,64 @@ async function refreshJwtToken(client) {
 }
 
 /**
- * Actualiza el JWT (y opcionalmente el refresh token) en el blob storage
+ * Actualiza el JWT (y opcionalmente el refresh token) en el blob storage.
+ * Si el cliente no existe en blob (es de env vars), lo agrega como entrada nueva (upsert).
  */
-async function updateClientJwt(slug, newJwt, newRefreshToken = null) {
+async function updateClientJwt(slug, newJwt, newRefreshToken = null, clientFallback = null) {
   const clients = await readBlobClients();
   const idx = clients.findIndex((c) => c.slug === slug.toLowerCase());
   if (idx !== -1) {
     clients[idx].jwtToken = newJwt;
     clients[idx].jwtRefreshedAt = new Date().toISOString();
-    if (newRefreshToken) {
-      clients[idx].refreshToken = newRefreshToken;
-    }
-    await writeBlobClients(clients);
+    if (newRefreshToken) clients[idx].refreshToken = newRefreshToken;
+  } else {
+    // Cliente de env vars: crear entrada en blob para poder persistir tokens actualizados
+    const base = clientFallback || {};
+    clients.push({
+      slug: slug.toLowerCase(),
+      name: base.name || slug,
+      apiKey: base.apiKey || "",
+      jwtToken: newJwt,
+      refreshToken: newRefreshToken || base.refreshToken || "",
+      instanceId: base.instanceId || "",
+      employeeInternalId: base.employeeInternalId || "",
+      createdBy: base.createdBy || "env",
+      createdAt: base.createdAt || new Date().toISOString(),
+      jwtRefreshedAt: new Date().toISOString(),
+      source: "env_migrated",
+    });
   }
+  await writeBlobClients(clients);
 }
 
 /**
- * Obtiene la configuración del cliente, refrescando el JWT si es necesario
+ * Obtiene la configuración del cliente, refrescando el JWT si es necesario.
+ * Blob tiene prioridad sobre env vars para que los tokens actualizados (refresh) sean respetados.
  */
 export async function getClientConfig(clientSlug) {
-  // 1. Buscar en env vars
-  const envClients = getEnvClients();
-  const envMatch = envClients.find((c) => c.slug === clientSlug.toLowerCase());
-  if (envMatch) return envMatch;
+  const slug = clientSlug.toLowerCase();
 
-  // 2. Buscar en Blob
+  // 1. Buscar en Blob primero (puede tener token más fresco que env vars)
   const blobClients = await readBlobClients();
-  const blobMatch = blobClients.find((c) => c.slug === clientSlug.toLowerCase());
-  
-  if (!blobMatch) return null;
+  const blobMatch = blobClients.find((c) => c.slug === slug);
+
+  // 2. Si no está en blob, buscar en env vars
+  const envClients = getEnvClients();
+  const envMatch = envClients.find((c) => c.slug === slug);
+
+  // Usar blob si existe, sino env vars
+  const match = blobMatch || envMatch || null;
+  if (!match) return null;
 
   // 3. Verificar si el JWT necesita refresh (dura 15 min, threshold a los 10 min)
-  if (isTokenExpiringSoon(blobMatch.jwtToken)) {
+  if (isTokenExpiringSoon(match.jwtToken)) {
     console.log(`[Auth] JWT expirando para ${clientSlug}, intentando refresh con refresh token...`);
     try {
-      const tokens = await refreshJwtToken(blobMatch);
+      const tokens = await refreshJwtToken(match);
       if (tokens) {
-        await updateClientJwt(clientSlug, tokens.accessToken, tokens.refreshToken);
-        blobMatch.jwtToken = tokens.accessToken;
-        if (tokens.refreshToken) blobMatch.refreshToken = tokens.refreshToken;
+        await updateClientJwt(clientSlug, tokens.accessToken, tokens.refreshToken, match);
+        match.jwtToken = tokens.accessToken;
+        if (tokens.refreshToken) match.refreshToken = tokens.refreshToken;
         console.log(`[Auth] JWT refrescado exitosamente para ${clientSlug}`);
       }
     } catch (err) {
@@ -156,7 +175,7 @@ export async function getClientConfig(clientSlug) {
     }
   }
 
-  return blobMatch;
+  return match;
 }
 
 /**
@@ -190,7 +209,7 @@ export async function callWithRetry(clientSlug, apiCall, maxRetries = 1) {
         try {
           const tokens = await refreshJwtToken(config);
           if (tokens) {
-            await updateClientJwt(clientSlug, tokens.accessToken, tokens.refreshToken);
+            await updateClientJwt(clientSlug, tokens.accessToken, tokens.refreshToken, config);
             config = { ...config, jwtToken: tokens.accessToken };
             if (tokens.refreshToken) config.refreshToken = tokens.refreshToken;
             continue; // Reintentar con nuevo token

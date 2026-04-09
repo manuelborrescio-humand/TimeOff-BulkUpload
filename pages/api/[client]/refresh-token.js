@@ -1,4 +1,4 @@
-import { readBlobClients, writeBlobClients } from "../lib/auth";
+import { getClientConfig, readBlobClients, writeBlobClients } from "../lib/auth";
 
 const API_BASE = "https://api-prod.humand.co";
 
@@ -8,15 +8,48 @@ export default async function handler(req, res) {
   const clientSlug = req.query.client;
   const { password } = req.body;
 
-  // Buscar el cliente
-  const clients = await readBlobClients();
-  const clientIdx = clients.findIndex((c) => c.slug === clientSlug.toLowerCase());
+  // Buscar el cliente (busca en blob Y en env vars)
+  const client = await getClientConfig(clientSlug);
 
-  if (clientIdx === -1) {
+  if (!client) {
     return res.status(404).json({ error: "Cliente no encontrado" });
   }
 
-  const client = clients[clientIdx];
+  // Para el upsert en blob necesitamos el array mutable
+  const clients = await readBlobClients();
+  const clientIdx = clients.findIndex((c) => c.slug === clientSlug.toLowerCase());
+
+  // Helper: guarda el token actualizado en blob (upsert — crea entrada si el cliente es de env vars)
+  const saveToBlob = async (newJwt, newRefreshToken, extraFields = {}) => {
+    const now = new Date().toISOString();
+    if (clientIdx !== -1) {
+      clients[clientIdx] = {
+        ...clients[clientIdx],
+        jwtToken: newJwt,
+        jwtRefreshedAt: now,
+        ...(newRefreshToken ? { refreshToken: newRefreshToken } : {}),
+        ...extraFields,
+      };
+    } else {
+      // Cliente de env vars: insertar en blob para que los próximos getClientConfig() usen el token fresco
+      clients.push({
+        slug: clientSlug.toLowerCase(),
+        name: client.name || clientSlug,
+        apiKey: client.apiKey || "",
+        jwtToken: newJwt,
+        refreshToken: newRefreshToken || client.refreshToken || "",
+        instanceId: client.instanceId || "",
+        employeeInternalId: client.employeeInternalId || "",
+        createdBy: client.createdBy || "env",
+        createdAt: client.createdAt || now,
+        jwtRefreshedAt: now,
+        source: "env_migrated",
+        ...extraFields,
+      });
+    }
+    await writeBlobClients(clients);
+    return now;
+  };
 
   try {
     // Estrategia 1: usar el refresh token guardado (sin necesitar contraseña)
@@ -33,16 +66,11 @@ export default async function handler(req, res) {
       if (refreshRes.ok) {
         const refreshData = await refreshRes.json();
         if (refreshData.accessToken) {
-          clients[clientIdx].jwtToken = refreshData.accessToken;
-          clients[clientIdx].jwtRefreshedAt = new Date().toISOString();
-          if (refreshData.refreshToken) {
-            clients[clientIdx].refreshToken = refreshData.refreshToken;
-          }
-          await writeBlobClients(clients);
+          const refreshedAt = await saveToBlob(refreshData.accessToken, refreshData.refreshToken || null);
           return res.status(200).json({
             success: true,
             method: "refresh_token",
-            refreshedAt: clients[clientIdx].jwtRefreshedAt,
+            refreshedAt,
             expiresIn: "~15 minutos",
           });
         }
@@ -98,18 +126,16 @@ export default async function handler(req, res) {
       });
     }
 
-    // Actualizar JWT, refresh token e instanceId guardados
-    clients[clientIdx].jwtToken = loginData.accessToken;
-    clients[clientIdx].jwtRefreshedAt = new Date().toISOString();
-    if (loginData.refreshToken) clients[clientIdx].refreshToken = loginData.refreshToken;
-    if (instanceId) clients[clientIdx].instanceId = instanceId;
-    if (employeeInternalId) clients[clientIdx].employeeInternalId = employeeInternalId;
-    await writeBlobClients(clients);
+    const refreshedAt = await saveToBlob(
+      loginData.accessToken,
+      loginData.refreshToken || null,
+      { instanceId, employeeInternalId }
+    );
 
     res.status(200).json({
       success: true,
       method: "password_login",
-      refreshedAt: clients[clientIdx].jwtRefreshedAt,
+      refreshedAt,
       expiresIn: "~15 minutos",
     });
 
