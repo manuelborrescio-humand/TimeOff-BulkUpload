@@ -7,22 +7,39 @@ const REDASH_QUERY_ID = process.env.REDASH_VACATION_QUERY_ID || "5050";
 const API_BASE = "https://api-prod.humand.co";
 
 /**
- * Fetches instanceId from the balances endpoint if not cached in config.
+ * Fetches instanceId from Humand API using the client's API key.
+ * Returns { instanceId, source, raw } for debugging.
  */
 async function fetchInstanceId(config) {
+  const headers = {
+    Authorization: `Basic ${config.apiKey}`,
+    "Content-Type": "application/json",
+  };
+
+  // Intento 1: /public/api/v1/users/me → puede tener instanceId directo
   try {
-    const resp = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, {
-      headers: {
-        Authorization: `Basic ${config.apiKey}`,
-        "Content-Type": "application/json",
-      },
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    return data.items?.[0]?.user?.instanceId || null;
-  } catch {
-    return null;
+    const resp = await fetch(`${API_BASE}/public/api/v1/users/me`, { headers });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.instanceId) return { instanceId: data.instanceId, source: "users/me", raw: data };
+    }
+  } catch {}
+
+  // Intento 2: /public/api/v1/time-off/balances → items[0].user.instanceId
+  try {
+    const resp = await fetch(`${API_BASE}/public/api/v1/time-off/balances?limit=1`, { headers });
+    if (resp.ok) {
+      const data = await resp.json();
+      const id = data.items?.[0]?.user?.instanceId;
+      if (id) return { instanceId: id, source: "balances.user.instanceId", raw: data.items?.[0]?.user };
+      // Devolver info de debug aunque no haya instanceId
+      return { instanceId: null, source: "balances (sin instanceId)", raw: data };
+    }
+  } catch (e) {
+    return { instanceId: null, source: "balances (error)", raw: e.message };
   }
+
+  return { instanceId: null, source: "no endpoint funcionó", raw: null };
 }
 
 /**
@@ -54,10 +71,21 @@ export default async function handler(req, res) {
   const config = await getClientConfig(clientSlug);
   if (!config) return res.status(404).json({ error: "Cliente no encontrado" });
 
-  // Resolve instanceId from config cache or balances endpoint
-  const instanceId = config.instanceId || await fetchInstanceId(config);
+  // Resolve instanceId from config cache or Humand API
+  let instanceId = config.instanceId;
+  let fetchDebug = null;
   if (!instanceId) {
-    return res.status(400).json({ error: "No se pudo obtener instanceId del cliente" });
+    const fetched = await fetchInstanceId(config);
+    instanceId = fetched.instanceId;
+    fetchDebug = { source: fetched.source, raw: fetched.raw };
+  }
+
+  if (!instanceId) {
+    return res.status(400).json({
+      error: "No se pudo obtener instanceId del cliente",
+      fetchDebug,
+      hint: "Revisá la respuesta de fetchDebug.raw para entender qué devuelve el API key de Humand",
+    });
   }
 
   if (!REDASH_API_KEY) {
@@ -82,5 +110,5 @@ export default async function handler(req, res) {
   const rows = data?.query_result?.data?.rows || [];
   const items = rows.map(mapRedashRow);
 
-  res.status(200).json({ items, total: items.length, _debug: { instanceId, rowsFromRedash: rows.length } });
+  res.status(200).json({ items, total: items.length, _debug: { instanceId, fetchDebug, rowsFromRedash: rows.length } });
 }
