@@ -6,13 +6,9 @@ const REDASH_QUERY_ID = process.env.REDASH_VACATION_QUERY_ID || "5050";
 
 const HUMAND_API_BASE = "https://api-prod.humand.co";
 
-/**
- * Fetches instanceId from Humand API using the client's API key.
- */
 async function fetchInstanceId(config) {
   const headers = { Authorization: `Basic ${config.apiKey}`, "Content-Type": "application/json" };
 
-  // Intento 1: users/me
   try {
     const resp = await fetch(`${HUMAND_API_BASE}/public/api/v1/users/me`, { headers });
     if (resp.ok) {
@@ -21,7 +17,6 @@ async function fetchInstanceId(config) {
     }
   } catch {}
 
-  // Intento 2: balances
   try {
     const resp = await fetch(`${HUMAND_API_BASE}/public/api/v1/time-off/balances?limit=1`, { headers });
     if (resp.ok) {
@@ -34,9 +29,6 @@ async function fetchInstanceId(config) {
   return null;
 }
 
-/**
- * Maps a Redash row (query 5050) to the normalized format expected by the frontend.
- */
 function mapRedashRow(row) {
   return {
     id: row.requestId,
@@ -57,13 +49,24 @@ function sleep(ms) {
 }
 
 /**
- * Fetches fresh results from Redash using POST with max_age:0 + polling.
- * Returns rows array or throws.
+ * Estrategia 1: GET con max_age=0 (ejecución fresca sincrónica — rápido si Redash responde < 30s)
  */
-async function fetchRedashFresh(instanceId) {
+async function tryGetFresh(instanceId) {
+  const url = `${REDASH_URL}/api/queries/${REDASH_QUERY_ID}/results.json?api_key=${REDASH_API_KEY}&p_instanceId=${instanceId}&max_age=0`;
+  const resp = await fetch(url, { signal: AbortSignal.timeout(28000) });
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  // Redash puede devolver un job en lugar de resultados directos
+  if (data.job) return null; // necesita polling
+  return data?.query_result?.data?.rows ?? null;
+}
+
+/**
+ * Estrategia 2: POST con max_age:0 + polling (hasta 50s)
+ */
+async function tryPostWithPolling(instanceId) {
   const authHeader = { Authorization: `Key ${REDASH_API_KEY}`, "Content-Type": "application/json" };
 
-  // POST to trigger fresh execution
   const postResp = await fetch(`${REDASH_URL}/api/queries/${REDASH_QUERY_ID}/results`, {
     method: "POST",
     headers: authHeader,
@@ -77,25 +80,24 @@ async function fetchRedashFresh(instanceId) {
 
   const postData = await postResp.json();
 
-  // Result already available (cached hit with max_age match)
   if (postData.query_result) {
     return postData.query_result.data.rows || [];
   }
 
-  // Job started — poll until done
-  if (postData.job) {
-    const jobId = postData.job.id;
-    for (let attempt = 0; attempt < 30; attempt++) {
-      await sleep(1000);
+  if (!postData.job) {
+    throw new Error("Respuesta inesperada de Redash: " + JSON.stringify(postData).slice(0, 200));
+  }
 
+  const jobId = postData.job.id;
+  for (let attempt = 0; attempt < 50; attempt++) {
+    await sleep(1000);
+    try {
       const jobResp = await fetch(`${REDASH_URL}/api/jobs/${jobId}`, { headers: authHeader });
       if (!jobResp.ok) continue;
-
       const jobData = await jobResp.json();
       const status = jobData.job?.status;
 
       if (status === 3) {
-        // Success — fetch result
         const resultId = jobData.job.query_result_id;
         const resultResp = await fetch(`${REDASH_URL}/api/query_results/${resultId}`, { headers: authHeader });
         const resultData = await resultResp.json();
@@ -105,12 +107,13 @@ async function fetchRedashFresh(instanceId) {
       if (status === 4) {
         throw new Error("Redash query falló: " + (jobData.job?.error || "error desconocido"));
       }
-      // status 1 = pending, 2 = running — seguir esperando
+    } catch (e) {
+      if (e.message.includes("Redash query")) throw e;
+      // Error de red — seguir intentando
     }
-    throw new Error("Redash query timeout (>30s)");
   }
 
-  throw new Error("Respuesta inesperada de Redash: " + JSON.stringify(postData).slice(0, 200));
+  throw new Error("Redash query timeout (>50s)");
 }
 
 export default async function handler(req, res) {
@@ -125,7 +128,6 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "REDASH_API_KEY no configurada en variables de entorno" });
   }
 
-  // Resolve instanceId from config or Humand API
   const instanceId = config.instanceId || await fetchInstanceId(config);
   if (!instanceId) {
     return res.status(400).json({ error: "No se pudo obtener instanceId del cliente" });
@@ -133,7 +135,13 @@ export default async function handler(req, res) {
 
   let rows;
   try {
-    rows = await fetchRedashFresh(instanceId);
+    // Intentar GET fresco primero (más simple, menos overhead)
+    rows = await tryGetFresh(instanceId);
+
+    // Si GET no funcionó (devolvió job o null), usar POST+polling
+    if (rows === null) {
+      rows = await tryPostWithPolling(instanceId);
+    }
   } catch (err) {
     return res.status(502).json({ error: err.message });
   }

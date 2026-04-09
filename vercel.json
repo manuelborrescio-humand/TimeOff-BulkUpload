@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "pages/api/[client]/all-requests.js": {
+      "maxDuration": 60
+    }
+  }
+}
