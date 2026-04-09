@@ -4,8 +4,21 @@ const API_BASE = "https://api-prod.humand.co";
 const PAGE_SIZE = 100;
 
 /**
+ * Decodes a JWT payload without verifying signature.
+ * Returns the payload object or null.
+ */
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetches instanceId from the balances endpoint if not cached in config.
- * Returns null if it can't be obtained.
  */
 async function fetchInstanceId(config) {
   try {
@@ -32,6 +45,10 @@ export default async function handler(req, res) {
     // Resolve instanceId: from config cache or from balances endpoint
     const instanceId = config.instanceId || await fetchInstanceId(config);
 
+    // Extract role from JWT payload (Humand requires it as a query param)
+    const jwtPayload = decodeJwtPayload(config.jwtToken);
+    const role = jwtPayload?.role || jwtPayload?.roles?.[0] || "ADMIN";
+
     const allItems = [];
     let page = 0;
     let hasMore = true;
@@ -40,9 +57,10 @@ export default async function handler(req, res) {
       const paramObj = {
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE,
+        role,
       };
 
-      // Include instanceId if we have it (required by Humand for listing all requests)
+      // Include instanceId if we have it
       if (instanceId) paramObj.instanceId = instanceId;
 
       const params = new URLSearchParams(paramObj);
@@ -57,7 +75,6 @@ export default async function handler(req, res) {
       });
 
       if (!resp.ok) {
-        // Try to get the real Humand error message for debugging
         const data = await resp.json().catch(() => ({}));
         const humandMsg = data.message || data.code || data.error || JSON.stringify(data);
 
@@ -69,7 +86,7 @@ export default async function handler(req, res) {
           status: resp.status,
           error: `Error ${resp.status} de Humand: ${humandMsg}`,
           humandError: data,
-          instanceIdUsed: instanceId || "(ninguno)",
+          debugInfo: { instanceIdUsed: instanceId || "(ninguno)", roleUsed: role },
         };
       }
 
@@ -101,7 +118,7 @@ export default async function handler(req, res) {
     return res.status(result.status || 502).json({
       error: result.error,
       humandError: result.humandError,
-      instanceIdUsed: result.instanceIdUsed,
+      debugInfo: result.debugInfo,
     });
   }
 
