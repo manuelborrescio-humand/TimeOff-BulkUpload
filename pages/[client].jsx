@@ -630,6 +630,10 @@ export default function ClientPage() {
 
   useEffect(() => {
     if (step !== "mapping" || users.length === 0 || policyTypes.length === 0) return;
+    // Leer dedup map para marcar filas ya existentes antes de ejecutar
+    const slug = clientSlug || window.location.pathname.replace("/", "");
+    const dedupMapNow = getDedupMap(slug);
+
     const validated = rows.map((row) => {
       const userInput = (row[columnMap.email] || "").toString().trim();
       const policyName = normalizeStr(row[columnMap.policy]);
@@ -658,6 +662,13 @@ export default function ClientPage() {
       if (expectedDays && excelDays && excelDays !== expectedDays) {
         warnings.push(`Excel dice ${excelDays} días, calculados: ${expectedDays} ${cm === "BUSINESS_DAYS" ? "hábiles" : "corridos"}`);
       }
+
+      // Chequear índice de dedup para marcar si ya existe en Humand
+      const dk = user?.id && pt?.policyTypeId && fromDate && toDate
+        ? dedupMakeKey(user.id, pt.policyTypeId, fromDate, toDate)
+        : null;
+      const dedupEntry = dk ? dedupMapNow[dk] : null;
+
       return {
         raw: row,
         email: row[columnMap.email],
@@ -677,10 +688,12 @@ export default function ClientPage() {
         errors,
         warnings,
         valid: errors.length === 0,
+        inDedup: !!dedupEntry,
+        dedupRequestId: dedupEntry?.requestId || null,
       };
     });
     setValidatedRows(validated);
-  }, [step, rows, users, policyTypes, columnMap]);
+  }, [step, rows, users, policyTypes, columnMap, clientSlug]);
 
   const loadAllRequests = async () => {
     setRequestsLoading(true);
@@ -759,7 +772,8 @@ export default function ClientPage() {
     let successfulRequests = 0;
 
     // Índice de dedup desde localStorage — previene crear solicitudes duplicadas
-    const dedupMap = getDedupMap(clientSlug);
+    const slug = clientSlug || window.location.pathname.replace("/", "");
+    const dedupMap = getDedupMap(slug);
 
     for (let i = 0; i < validatedRows.length; i++) {
       const row = validatedRows[i];
@@ -1558,6 +1572,22 @@ export default function ClientPage() {
                     <h2 style={styles.sectionTitle}>
                       Vista previa ({validCount} válidas de {validatedRows.length})
                     </h2>
+                    {(() => {
+                      const dedupCount = validatedRows.filter(r => r.inDedup).length;
+                      const newCount = validatedRows.filter(r => r.valid && !r.inDedup).length;
+                      const errorCount = validatedRows.filter(r => !r.valid).length;
+                      if (dedupCount === 0) return null;
+                      return (
+                        <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
+                          <span style={{ ...styles.badge.existed, fontSize: 13, padding: "4px 10px" }}>
+                            ✅ {dedupCount} ya existen en Humand — se van a omitir
+                          </span>
+                          {newCount > 0 && <span style={{ ...styles.badge.ok, fontSize: 13, padding: "4px 10px" }}>✨ {newCount} nuevas a crear</span>}
+                          {errorCount > 0 && <span style={{ ...styles.badge.error, fontSize: 13, padding: "4px 10px" }}>❌ {errorCount} con error</span>}
+                        </div>
+                      );
+                    })()}
+
                     <div style={{ overflowX: "auto" }}>
                       <table style={styles.table}>
                         <thead>
@@ -1594,11 +1624,15 @@ export default function ClientPage() {
                                 )}
                               </td>
                               <td style={styles.td}>
-                                {row.valid ? (
+                                {row.inDedup ? (
+                                  <span style={styles.badge.existed} title={`Ya existe en Humand (#${row.dedupRequestId})`}>
+                                    Ya existe #{row.dedupRequestId}
+                                  </span>
+                                ) : row.valid ? (
                                   row.warnings?.length > 0 ? (
                                     <span style={styles.badge.warning} title={row.warnings.join("\n")}>OK ({row.warnings[0]})</span>
                                   ) : (
-                                    <span style={styles.badge.ok}>OK</span>
+                                    <span style={styles.badge.ok}>✨ Nueva</span>
                                   )
                                 ) : (
                                   <span style={styles.badge.error} title={row.errors.join("\n")}>
