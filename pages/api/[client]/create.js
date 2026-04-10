@@ -134,6 +134,9 @@ export default async function handler(req, res) {
 
   const result = await callWithRetry(clientSlug, (config) => createRequest(config, body));
 
+  if (result.tokenExpired) {
+    return res.status(401).json({ error: "TOKEN_EXPIRED" });
+  }
   if (result.error) {
     return res.status(result.status || 502).json({ error: result.error, details: result.details });
   }
