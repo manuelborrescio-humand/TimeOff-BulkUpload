@@ -29,13 +29,15 @@ export default async function handler(req, res) {
     }
 
     const allItems = [];
-    let page = 0;
+    const seenIds = new Set(); // safety net: detectar si la API devuelve repetidos
+    let page = 1; // Humand /vacations/requests usa ?page=N (1-indexed). NO usa ?offset=
     let hasMore = true;
+    const MAX_PAGES = 50; // 50 × 100 = 5000 solicitudes max — margen amplio
 
     while (hasMore) {
       const params = new URLSearchParams({
         limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
+        page,
         instanceId,
         role: "MANAGER",   // único valor válido para ver solicitudes de otros usuarios
       });
@@ -62,7 +64,21 @@ export default async function handler(req, res) {
       const items = Array.isArray(data) ? data : (data.items || data.content || data.data || []);
       const total = data.total ?? data.totalElements ?? null;
 
-      allItems.push(...items);
+      // Safety net: si la API ignora el param de paginación (como pasaba antes
+      // con `offset`) y devuelve siempre la misma página, lo detectamos por IDs
+      // ya vistos y abortamos. Esto previene la inflación 20x del bug anterior.
+      const newItems = items.filter((it) => {
+        if (seenIds.has(it.id)) return false;
+        seenIds.add(it.id);
+        return true;
+      });
+      if (items.length > 0 && newItems.length === 0) {
+        // La página devolvió solo items ya vistos → la paginación está rota,
+        // no tiene sentido seguir.
+        hasMore = false;
+        break;
+      }
+      allItems.push(...newItems);
 
       if (items.length < PAGE_SIZE || (total !== null && allItems.length >= total) || Array.isArray(data)) {
         hasMore = false;
@@ -70,7 +86,7 @@ export default async function handler(req, res) {
         page++;
       }
 
-      if (page >= 20) hasMore = false;
+      if (page > MAX_PAGES) hasMore = false;
     }
 
     return { ok: true, items: allItems, total: allItems.length };
