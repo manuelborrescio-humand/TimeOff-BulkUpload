@@ -1,4 +1,4 @@
-import { readBlobClients, writeBlobClients } from "../lib/auth";
+import { readBlobClients, writeBlobClients, READ_FAILED } from "../lib/auth";
 
 const API_BASE = "https://api-prod.humand.co";
 
@@ -11,10 +11,13 @@ async function findClient(slug) {
   const lower = slug.toLowerCase();
 
   // 1. Buscar en blob (máxima prioridad — tiene tokens más frescos)
+  // readBlobClients ya tiene retry interno (3 intentos con backoff)
   try {
     const blobClients = await readBlobClients();
-    const blobMatch = blobClients.find((c) => c.slug === lower);
-    if (blobMatch) return { client: blobMatch, source: "blob" };
+    if (Array.isArray(blobClients)) {
+      const blobMatch = blobClients.find((c) => c.slug === lower);
+      if (blobMatch) return { client: blobMatch, source: "blob" };
+    }
   } catch {}
 
   // 2. Buscar en env vars directo usando el slug
@@ -62,16 +65,30 @@ export default async function handler(req, res) {
 
   const { client } = found;
 
-  // Mutable array de blob para hacer upsert al final
+  // Mutable array de blob para hacer upsert al final.
+  // CRÍTICO: si la lectura falló, dejamos blobClients como READ_FAILED para que
+  // saveToBlob aborte (no queremos sobreescribir el blob con datos parciales).
   let blobClients = [];
   let clientIdx = -1;
+  let readFailed = false;
   try {
-    blobClients = await readBlobClients();
-    clientIdx = blobClients.findIndex((c) => c.slug === clientSlug.toLowerCase());
-  } catch {}
+    const r = await readBlobClients();
+    if (r === READ_FAILED) {
+      readFailed = true;
+    } else {
+      blobClients = r;
+      clientIdx = blobClients.findIndex((c) => c.slug === clientSlug.toLowerCase());
+    }
+  } catch {
+    readFailed = true;
+  }
 
   // Helper: guarda el token actualizado en blob (upsert)
   const saveToBlob = async (newJwt, newRefreshToken, extraFields = {}) => {
+    if (readFailed) {
+      console.error(`[refresh-token] saveToBlob abortado para ${clientSlug}: lectura previa falló`);
+      return new Date().toISOString();
+    }
     const now = new Date().toISOString();
     const updated = {
       slug: clientSlug.toLowerCase(),

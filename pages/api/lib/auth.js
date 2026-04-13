@@ -6,15 +6,44 @@ const BLOB_KEY = "config/clients.json";
 // JWT tokens de Humand duran 15 minutos, refrescamos a los 10 min
 const TOKEN_REFRESH_THRESHOLD_MS = 10 * 60 * 1000;
 
+// Sentinela para distinguir "blob vacío real" de "lectura fallida".
+// CRÍTICO: nunca escribir al blob basado en lectura fallida — perderíamos clientes.
+const READ_FAILED = Symbol("READ_FAILED");
+
+async function readBlobClientsRaw() {
+  const { blobs } = await list({ prefix: BLOB_KEY });
+  if (blobs.length === 0) return [];
+  const resp = await fetch(blobs[0].url);
+  if (!resp.ok) throw new Error(`Blob fetch failed: ${resp.status}`);
+  return await resp.json();
+}
+
+/**
+ * Lee la lista de clientes con retry exponencial (3 intentos).
+ * Devuelve [] si el blob está realmente vacío.
+ * Devuelve READ_FAILED si todos los intentos fallaron — el caller debe NO escribir al blob.
+ */
 async function readBlobClients() {
-  try {
-    const { blobs } = await list({ prefix: BLOB_KEY });
-    if (blobs.length === 0) return [];
-    const resp = await fetch(blobs[0].url);
-    return await resp.json();
-  } catch {
-    return [];
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      return await readBlobClientsRaw();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < 2) await new Promise((r) => setTimeout(r, 200 * (attempt + 1)));
+    }
   }
+  console.error(`[Auth] readBlobClients falló después de 3 intentos:`, lastErr?.message);
+  return READ_FAILED;
+}
+
+/**
+ * Versión "safe" para callers que solo necesitan leer (no escribir):
+ * trata READ_FAILED como [] para no romper el flujo de lectura.
+ */
+async function readBlobClientsOrEmpty() {
+  const result = await readBlobClients();
+  return result === READ_FAILED ? [] : result;
 }
 
 async function writeBlobClients(clients) {
@@ -114,6 +143,12 @@ async function refreshJwtToken(client) {
  */
 async function updateClientJwt(slug, newJwt, newRefreshToken = null, clientFallback = null) {
   const clients = await readBlobClients();
+  // CRÍTICO: si la lectura falló, NO escribir — sobreescribiríamos el blob con datos parciales
+  // y perderíamos el resto de los clientes. Mejor saltarse este refresh.
+  if (clients === READ_FAILED) {
+    console.error(`[Auth] updateClientJwt abortado para ${slug}: lectura de blob falló (no se escribe para no perder datos)`);
+    return false;
+  }
   const idx = clients.findIndex((c) => c.slug === slug.toLowerCase());
   if (idx !== -1) {
     clients[idx].jwtToken = newJwt;
@@ -136,7 +171,13 @@ async function updateClientJwt(slug, newJwt, newRefreshToken = null, clientFallb
       source: "env_migrated",
     });
   }
-  await writeBlobClients(clients);
+  try {
+    await writeBlobClients(clients);
+    return true;
+  } catch (err) {
+    console.error(`[Auth] writeBlobClients falló para ${slug}:`, err.message);
+    return false;
+  }
 }
 
 /**
@@ -147,7 +188,8 @@ export async function getClientConfig(clientSlug) {
   const slug = clientSlug.toLowerCase();
 
   // 1. Buscar en Blob primero (puede tener token más fresco que env vars)
-  const blobClients = await readBlobClients();
+  // Si el blob falla transitoriamente, caemos a env vars en lugar de devolver null
+  const blobClients = await readBlobClientsOrEmpty();
   const blobMatch = blobClients.find((c) => c.slug === slug);
 
   // 2. Si no está en blob, buscar en env vars
@@ -238,5 +280,5 @@ export async function callWithRetry(clientSlug, apiCall, maxRetries = 1) {
   return { error: "Max retries exceeded", status: 500 };
 }
 
-// Re-exportar funciones para clients.js
-export { readBlobClients, writeBlobClients, getEnvClients };
+// Re-exportar funciones para clients.js y otros endpoints
+export { readBlobClients, readBlobClientsOrEmpty, writeBlobClients, getEnvClients, READ_FAILED };
