@@ -20,7 +20,18 @@ export default async function handler(req, res) {
     const blobClients = (await readBlobClientsOrEmpty()).map((c) => ({
       slug: c.slug, name: c.name, createdBy: c.createdBy, createdAt: c.createdAt, source: "blob",
     }));
-    return res.status(200).json([...envClients, ...blobClients]);
+    // Deduplicar por slug. Si está en ambos, preferir blob (tiene metadata
+    // como createdBy/createdAt) pero marcar source como "env+blob" para
+    // visibilidad — y env solo se mantiene si no hay match en blob.
+    const blobSlugs = new Set(blobClients.map((c) => c.slug));
+    const merged = [
+      ...blobClients.map((c) => ({
+        ...c,
+        source: envClients.some((e) => e.slug === c.slug) ? "env+blob" : "blob",
+      })),
+      ...envClients.filter((c) => !blobSlugs.has(c.slug)),
+    ];
+    return res.status(200).json(merged);
   }
 
   // CRÍTICO para POST/PATCH/DELETE: si la lectura del blob falla, ABORTAR.
