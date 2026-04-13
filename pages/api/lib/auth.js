@@ -59,7 +59,8 @@ function getEnvClients() {
   const clients = [];
   const seen = new Set();
   for (const key of Object.keys(process.env)) {
-    const match = key.match(/^CLIENT_(.+?)_(API_KEY|JWT_TOKEN|NAME)$/);
+    // Reconocer cualquier sufijo de cliente; el filtro real es tener API_KEY + NAME
+    const match = key.match(/^CLIENT_(.+?)_(API_KEY|JWT_TOKEN|NAME|REFRESH_TOKEN|INSTANCE_ID|EMPLOYEE_INTERNAL_ID)$/);
     if (match && !seen.has(match[1])) {
       seen.add(match[1]);
       const slug = match[1];
@@ -71,6 +72,10 @@ function getEnvClients() {
           name,
           apiKey: process.env[`CLIENT_${slug}_API_KEY`],
           jwtToken: process.env[`CLIENT_${slug}_JWT_TOKEN`] || "",
+          // Habilitan el auto-refresh sin necesitar contraseña
+          refreshToken: process.env[`CLIENT_${slug}_REFRESH_TOKEN`] || "",
+          instanceId: process.env[`CLIENT_${slug}_INSTANCE_ID`] || "",
+          employeeInternalId: process.env[`CLIENT_${slug}_EMPLOYEE_INTERNAL_ID`] || "",
           source: "env",
         });
       }
