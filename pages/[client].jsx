@@ -170,7 +170,10 @@ export default function ClientPage() {
   const [requestsLoading, setRequestsLoading] = useState(false);
   const [requestsData, setRequestsData] = useState(null);
   const [requestsError, setRequestsError] = useState("");
-  
+
+  // Sync automático del índice de dedup contra Humand al inicio de cada carga
+  const [syncingDedup, setSyncingDedup] = useState(false);
+
   const fileRef = useRef(null);
 
   useEffect(() => {
@@ -774,6 +777,44 @@ export default function ClientPage() {
     // Índice de dedup desde localStorage — previene crear solicitudes duplicadas
     const slug = clientSlug || window.location.pathname.replace("/", "");
     const dedupMap = getDedupMap(slug);
+
+    // ── Auto-sync de dedup desde Humand ──
+    // Sembramos dedupMap con TODAS las solicitudes existentes en Humand antes
+    // de empezar el loop. Esto protege contra:
+    //   - localStorage vacío (otro browser, incógnito, cache borrado)
+    //   - Solicitudes creadas manualmente o desde otra herramienta
+    //   - Cargas anteriores no registradas localmente
+    // Se filtran CANCELED/REJECTED — no bloquean nuevas solicitudes en Humand.
+    setSyncingDedup(true);
+    try {
+      const syncRes = await fetch(`/api/${slug}/all-requests`);
+      if (syncRes.ok) {
+        const syncData = await syncRes.json();
+        const items = syncData.items || [];
+        let seeded = 0;
+        for (const r of items) {
+          const userId = r.issuerId || r.userId || r.issuer?.id;
+          const policyTypeId = r.policyTypeId || r.policyType?.id;
+          const fromDate = r.from?.date || r.fromDate;
+          const toDate = r.to?.date || r.toDate;
+          const state = r.state || "";
+          if (state === "CANCELED" || state === "REJECTED") continue;
+          if (!userId || !policyTypeId || !fromDate || !toDate) continue;
+          const k = dedupMakeKey(userId, policyTypeId, fromDate, toDate);
+          if (!dedupMap[k]) {
+            dedupMap[k] = { requestId: r.id, savedAt: new Date().toISOString() };
+            saveDedupEntry(slug, userId, policyTypeId, fromDate, toDate, r.id);
+            seeded++;
+          }
+        }
+        console.log(`[Dedup] Auto-sync: ${items.length} solicitudes leídas, ${seeded} nuevas en el índice`);
+      } else {
+        console.warn(`[Dedup] Auto-sync falló (HTTP ${syncRes.status}). Continuando con dedup local.`);
+      }
+    } catch (e) {
+      console.warn(`[Dedup] Auto-sync error:`, e.message);
+    }
+    setSyncingDedup(false);
 
     for (let i = 0; i < validatedRows.length; i++) {
       const row = validatedRows[i];
@@ -1663,7 +1704,7 @@ export default function ClientPage() {
           {(step === "executing" || step === "done") && (
             <div style={styles.section}>
               <h2 style={styles.sectionTitle}>
-                {step === "executing" ? `Procesando ${currentIndex + 1} de ${validatedRows.length}...` : "Resultado"}
+                {step === "executing" ? (syncingDedup ? "🔄 Verificando solicitudes existentes en Humand..." : `Procesando ${currentIndex + 1} de ${validatedRows.length}...`) : "Resultado"}
               </h2>
               {authErrorCount > 0 && step === "executing" && (
                 <div style={styles.authWarning}>
