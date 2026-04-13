@@ -1,4 +1,5 @@
 import { getClientConfig } from "../clients";
+import { fetchAllPages } from "../lib/humand-paginate";
 
 const API_BASE = "https://api-prod.humand.co/public/api/v1";
 
@@ -9,36 +10,28 @@ export default async function handler(req, res) {
   if (!config) return res.status(404).json({ error: "Client not configured" });
 
   try {
-    const allUsers = [];
-    let page = 1;
-    const limit = 50;
-    while (true) {
-      const resp = await fetch(`${API_BASE}/users?limit=${limit}&page=${page}`, {
-        headers: {
-          Authorization: `Basic ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-      });
-      if (!resp.ok) {
-        const err = await resp.text();
-        return res.status(resp.status).json({ error: "Humand API error", details: err });
-      }
-      const data = await resp.json();
-      for (const u of data.users) {
-        allUsers.push({
-          id: u.id,
-          email: u.email,
-          employeeInternalId: u.employeeInternalId,
-          firstName: u.firstName,
-          lastName: u.lastName,
-          nickname: u.nickname,
-        });
-      }
-      if (allUsers.length >= data.count) break;
-      page++;
-    }
+    const headers = {
+      Authorization: `Basic ${config.apiKey}`,
+      "Content-Type": "application/json",
+    };
+
+    const { all: rawUsers } = await fetchAllPages(
+      (page, limit) => `${API_BASE}/users?limit=${limit}&page=${page}`,
+      headers,
+      { limit: 50, concurrency: 10, itemsKey: "users" }
+    );
+
+    const allUsers = rawUsers.map((u) => ({
+      id: u.id,
+      email: u.email,
+      employeeInternalId: u.employeeInternalId,
+      firstName: u.firstName,
+      lastName: u.lastName,
+      nickname: u.nickname,
+    }));
+
     res.status(200).json(allUsers);
   } catch (err) {
-    res.status(502).json({ error: "Failed to fetch users", details: err.message });
+    res.status(err.status || 502).json({ error: "Failed to fetch users", details: err.message });
   }
 }

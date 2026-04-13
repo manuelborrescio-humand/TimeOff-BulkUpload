@@ -1,4 +1,5 @@
 import { getClientConfig } from "../clients";
+import { fetchAllPages } from "../lib/humand-paginate";
 
 const API_BASE = "https://api-prod.humand.co/public/api/v1";
 
@@ -9,24 +10,19 @@ export default async function handler(req, res) {
   if (!config) return res.status(404).json({ error: "Client not configured" });
 
   try {
-    const allItems = [];
-    let page = 1;
-    while (true) {
-      const resp = await fetch(`${API_BASE}/time-off/balances?limit=50&page=${page}`, {
-        headers: {
-          Authorization: `Basic ${config.apiKey}`,
-          "Content-Type": "application/json",
-        },
-      });
-      if (!resp.ok) {
-        const err = await resp.text();
-        return res.status(resp.status).json({ error: "Humand API error", details: err });
-      }
-      const data = await resp.json();
-      allItems.push(...data.items);
-      if (allItems.length >= data.count) break;
-      page++;
-    }
+    const headers = {
+      Authorization: `Basic ${config.apiKey}`,
+      "Content-Type": "application/json",
+    };
+
+    // /time-off/balances tiene 1 item por (usuario × política asignada).
+    // Para descubrir las políticas únicas + contar usuarios por política,
+    // necesitamos recorrer todos los items — pero en paralelo (no secuencial).
+    const { all: allItems } = await fetchAllPages(
+      (page, limit) => `${API_BASE}/time-off/balances?limit=${limit}&page=${page}`,
+      headers,
+      { limit: 50, concurrency: 10, itemsKey: "items" }
+    );
 
     const policiesMap = {};
     for (const item of allItems) {
@@ -56,6 +52,6 @@ export default async function handler(req, res) {
 
     res.status(200).json(Object.values(policiesMap));
   } catch (err) {
-    res.status(502).json({ error: "Failed to fetch policies", details: err.message });
+    res.status(err.status || 502).json({ error: "Failed to fetch policies", details: err.message });
   }
 }
